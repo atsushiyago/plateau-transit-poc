@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# copy-webpack-plugin が next dev/build 時に自動生成するCesium静的アセット（next.config.ts参照）
+/public/cesium/
+
 # production
 /build
 
