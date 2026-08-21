@@ -200,8 +200,11 @@ async function computeEffectiveDistances(
 // デマンド交通乗り場候補: アクセシビリティスコアが悪い（実効距離がACCESSIBILITY_RANKSの
 // 「600m〜1km」以上）の住宅系建物の座標にk-meansクラスタリングをかけ、クラスタ重心を
 // 「新しい乗り場を置くならここ」の候補地点として提案する。
-const DEMAND_TRANSIT_GAP_THRESHOLD_METERS = 600;
-const DEMAND_TRANSIT_CLUSTER_COUNT = 4;
+// 対象距離の閾値・候補数は、藤沢市の担当者が現場感覚に合わせてその場で調整できるよう
+// 左上のLegend内のスライダーで変更可能にしている（下記のuseState/refで管理。この2つの
+// 定数は初期値としてのみ使う）。
+const DEMAND_TRANSIT_GAP_THRESHOLD_METERS_DEFAULT = 600;
+const DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT = 4;
 // クラスタリング対象の建物数がこれ未満なら候補地点を出さない（サンプルが少なすぎて
 // 「クラスタ」と呼べる状態にならないため）。
 const DEMAND_TRANSIT_MIN_BUILDINGS = 8;
@@ -350,7 +353,17 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
   );
 }
 
-function Legend() {
+function Legend({
+  gapThreshold,
+  clusterCount,
+  onGapThresholdChange,
+  onClusterCountChange,
+}: {
+  gapThreshold: number;
+  clusterCount: number;
+  onGapThresholdChange: (value: number) => void;
+  onClusterCountChange: (value: number) => void;
+}) {
   return (
     <div
       style={{
@@ -365,7 +378,10 @@ function Legend() {
         fontSize: 12,
         lineHeight: 1.5,
         fontFamily: "sans-serif",
-        pointerEvents: "none",
+        // デマンド交通の閾値・候補数スライダーを操作できるようにする必要があるため、
+        // UncoloredBuildingsNote等の純粋な装飾パネルとは異なりpointerEventsを有効にしている
+        // （画面左上の固定サイズの小さな箱の中だけなので、他の地図操作の妨げにはならない）。
+        pointerEvents: "auto",
       }}
     >
       <div style={{ fontWeight: "bold", marginBottom: 4 }}>徒歩アクセシビリティ（住宅系建物）</div>
@@ -429,6 +445,34 @@ function Legend() {
         />
         <span>デマンド交通 乗り場候補</span>
       </div>
+      <div style={{ marginTop: 6 }}>
+        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <span>対象とする実効距離: {gapThreshold}m〜</span>
+        </label>
+        <input
+          type="range"
+          min={200}
+          max={2000}
+          step={50}
+          value={gapThreshold}
+          onChange={(e) => onGapThresholdChange(Number(e.target.value))}
+          style={{ width: "100%" }}
+        />
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <span>乗り場候補の数: {clusterCount}箇所</span>
+        </label>
+        <input
+          type="range"
+          min={1}
+          max={10}
+          step={1}
+          value={clusterCount}
+          onChange={(e) => onClusterCountChange(Number(e.target.value))}
+          style={{ width: "100%" }}
+        />
+      </div>
     </div>
   );
 }
@@ -463,6 +507,24 @@ export default function PlateauViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const [popup, setPopup] = useState<PopupInfo | null>(null);
+  const [demandTransitGapThreshold, setDemandTransitGapThreshold] = useState(
+    DEMAND_TRANSIT_GAP_THRESHOLD_METERS_DEFAULT
+  );
+  const [demandTransitClusterCount, setDemandTransitClusterCount] = useState(
+    DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT
+  );
+  // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
+  // 再レンダリングでは作り直されないため、スライダーの最新値をそのクロージャから読めるように
+  // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
+  const demandTransitGapThresholdRef = useRef(demandTransitGapThreshold);
+  const demandTransitClusterCountRef = useRef(demandTransitClusterCount);
+  useEffect(() => {
+    demandTransitGapThresholdRef.current = demandTransitGapThreshold;
+    demandTransitClusterCountRef.current = demandTransitClusterCount;
+  }, [demandTransitGapThreshold, demandTransitClusterCount]);
+  // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
+  // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
+  const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) return;
@@ -640,7 +702,7 @@ export default function PlateauViewer() {
         if (cancelled) return;
         const gapBuildings: DemandTransitMember[] = [];
         for (const { info } of buildingScoreCache.values()) {
-          if (info.effectiveDistanceMeters > DEMAND_TRANSIT_GAP_THRESHOLD_METERS) {
+          if (info.effectiveDistanceMeters > demandTransitGapThresholdRef.current) {
             gapBuildings.push({ lat: info.lat, lng: info.lng, effectiveDistanceMeters: info.effectiveDistanceMeters });
           }
         }
@@ -656,7 +718,7 @@ export default function PlateauViewer() {
         const refLat = gapBuildings.reduce((sum, b) => sum + b.lat, 0) / gapBuildings.length;
         const refLng = gapBuildings.reduce((sum, b) => sum + b.lng, 0) / gapBuildings.length;
         const projected = gapBuildings.map((b) => projectToLocalMeters(b.lat, b.lng, refLat, refLng));
-        const clusters = kMeans(projected, DEMAND_TRANSIT_CLUSTER_COUNT);
+        const clusters = kMeans(projected, demandTransitClusterCountRef.current);
 
         for (const cluster of clusters) {
           const [centroidLat, centroidLng] = unprojectFromLocalMeters(
@@ -693,6 +755,9 @@ export default function PlateauViewer() {
           recomputeDemandTransitCandidates();
         }, DEMAND_TRANSIT_RECOMPUTE_DEBOUNCE_MS);
       }
+      // スライダー操作（Reactのイベントハンドラ、このクロージャの外側）から再計算を
+      // トリガーできるようにrefへ登録しておく。
+      scheduleDemandTransitRecomputeRef.current = scheduleDemandTransitRecompute;
 
       async function processTile(tile: Cesium.Cesium3DTile) {
         if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0) return;
@@ -920,6 +985,7 @@ export default function PlateauViewer() {
 
     return () => {
       cancelled = true;
+      scheduleDemandTransitRecomputeRef.current = null;
       viewerRef.current?.destroy();
       viewerRef.current = null;
     };
@@ -928,7 +994,18 @@ export default function PlateauViewer() {
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
-      <Legend />
+      <Legend
+        gapThreshold={demandTransitGapThreshold}
+        clusterCount={demandTransitClusterCount}
+        onGapThresholdChange={(value) => {
+          setDemandTransitGapThreshold(value);
+          scheduleDemandTransitRecomputeRef.current?.();
+        }}
+        onClusterCountChange={(value) => {
+          setDemandTransitClusterCount(value);
+          scheduleDemandTransitRecomputeRef.current?.();
+        }}
+      />
       <UncoloredBuildingsNote />
       {popup && <InfoPopup info={popup} onClose={() => setPopup(null)} />}
     </div>
