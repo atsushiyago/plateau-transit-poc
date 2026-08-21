@@ -210,22 +210,14 @@ const DEMAND_TRANSIT_MIN_BUILDINGS = 8;
 const DEMAND_TRANSIT_RECOMPUTE_DEBOUNCE_MS = 1500;
 const DEMAND_TRANSIT_COLOR = "#a855f7";
 
-// 地図上の位置関係を土地勘なしでも把握できるようにするための、藤沢市北部の主要な駅・地名。
-// クリック不要の常時表示ラベルとして使うだけの、ごく小さい固定リストなので
-// バス停データのような public/data/*.json ではなくソース直書きにしている。
-// 座標はNominatim検索API（https://nominatim.openstreetmap.org/search）で個別に確認済み
-// （駅名は該当ノードが見つからずbus_stop等の近傍ノードにマッチした場合もあるが、
-// いずれも実際の駅・地区の位置に対して数十m以内の誤差で、ラベル用途としては十分な精度）。
-const PLACE_LABELS: { name: string; lat: number; lng: number }[] = [
-  { name: "湘南台駅", lat: 35.3964559, lng: 139.4665279 },
-  { name: "六会日大前駅", lat: 35.3836882, lng: 139.470958 },
-  { name: "善行駅", lat: 35.3631969, lng: 139.4729263 },
-  { name: "長後駅", lat: 35.4121164, lng: 139.4657253 },
-  { name: "六会", lat: 35.3870559, lng: 139.4736291 },
-  { name: "円行", lat: 35.385911, lng: 139.461669 },
-  { name: "亀井野", lat: 35.378374, lng: 139.475149 },
-  { name: "高倉", lat: 35.412746, lng: 139.4714525 },
-];
+// 地図上の位置関係を土地勘なしでも把握できるようにするための、藤沢市北部の駅・地区名ラベル。
+// 当初は8件をソース直書きしていたが、「もっと各所に地名を表示したい」というフィードバックを受けて
+// バス停・東海道線データと同じOverpass抽出パターンに切り替えた（詳細はAGENTS.md参照）。
+// 駅（railway=station/halt）と地区名（place=neighbourhood/quarter、丁目サフィックスを除去して
+// 大字・地区単位に統合、既存のisNorthOfTokaidoLineと同じロジックで北部のみに絞り込み済み）を
+// Overpassでまとめて抽出し、public/data/place-labels.json に保存してある。
+const PLACE_LABELS_JSON_URL = "/data/place-labels.json";
+type PlaceLabel = { name: string; lat: number; lng: number };
 
 // 対象エリアが藤沢市北部（東西南北とも十数km程度）に限られるため、緯度経度を
 // 単純な等距円筒図法でメートル相当のローカルXY座標に変換して使う（k-meansのユークリッド距離が
@@ -584,27 +576,36 @@ export default function PlateauViewer() {
         );
       }
 
-      // 主要な駅・地名を薄いテキストラベルとして常時表示する。土地勘のない判定員・自治体職員でも
+      // 駅・地区名をテキストラベルとして常時表示する。土地勘のない判定員・自治体職員でも
       // 位置関係を把握できるようにするための、あくまで補助的な表示（クリック不要、装飾のみ）。
       // isDemandTransitCandidate等のpropertiesを付けていないため、クリックハンドラの分岐には
       // 一切引っかからず、素通りしてsetPopup(null)になるだけ（既存の建物・バス停クリックと競合しない）。
-      for (const place of PLACE_LABELS) {
-        viewer.entities.add({
-          position: Cesium.Cartesian3.fromDegrees(place.lng, place.lat),
-          label: {
-            text: place.name,
-            font: "16px sans-serif",
-            fillColor: Cesium.Color.WHITE.withAlpha(0.6),
-            outlineColor: Cesium.Color.BLACK.withAlpha(0.6),
-            outlineWidth: 3,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-            // デマンド交通候補ピンと同じ理由（密集市街地で3D Tiles建物の陰に隠れるのを防ぐ）で
-            // 深度テストを無効化し、常に手前に表示する。
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-        });
+      try {
+        const res = await fetch(PLACE_LABELS_JSON_URL);
+        const data: { places: PlaceLabel[] } = await res.json();
+        if (cancelled) return;
+        for (const place of data.places) {
+          viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(place.lng, place.lat),
+            label: {
+              text: place.name,
+              font: "bold 16px sans-serif",
+              // バス停ピンの半透明色と同じ理由（背景の建物・地表色と合成されて薄く見えてしまう）で、
+              // 塗り・縁取りとも不透明にしている。
+              fillColor: Cesium.Color.WHITE,
+              outlineColor: Cesium.Color.BLACK,
+              outlineWidth: 4,
+              style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              // デマンド交通候補ピンと同じ理由（密集市街地で3D Tiles建物の陰に隠れるのを防ぐ）で
+              // 深度テストを無効化し、常に手前に表示する。
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          });
+        }
+      } catch (err) {
+        console.warn("地名ラベルデータの読み込みに失敗しました。ラベル表示なしで継続します。", err);
       }
 
       // 住宅系建物ごとに「最寄りバス停までの傾斜込み実効距離」を計算し、3D Tilesの
