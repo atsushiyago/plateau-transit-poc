@@ -34,8 +34,15 @@ const BUS_STOP_PIXEL_SIZE = 10;
 // operatorタグが無い/その他事業者のバス停は参考表示として残しつつ、視覚的に控えめにする
 // （下記MAJOR_OPERATOR_KEYWORDSに一致する主要事業者のみが実効距離の計算対象になるため、
 // 「どのピンが計算に使われているか」が見た目で分かるようにする）。
-const BUS_STOP_COLOR_MINOR = Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.35);
-const BUS_STOP_PIXEL_SIZE_MINOR = 6;
+// 当初は同じ#f59e0bを透明度35%にして小さく表示していたが、Cesiumのpointは背景（建物の色・
+// 地表色）と実際に合成されるため、赤い建物の上では暗く沈み、白い建物の上では薄く白っぽく、
+// 何もない地表（ortho画像未読み込み/欠損時のフォールバック色）の上では灰色がかって見えるなど、
+// 背景次第で色がバラついて見える問題があった（国土数値情報P11との突き合わせで、operatorタグの
+// 無い停留所の大半が実際には神奈中である可能性が高いと分かったこともあり、紛らわしい見た目を
+// 放置する理由がなくなった）。→ 不透明な淡いアンバー色に変更し、背景に関わらず一定の見た目になる
+// ようにした。主要事業者と同じサイズにしつつ、色相は保って「同じ系統だが未確認」と分かるようにしている。
+const BUS_STOP_COLOR_MINOR = Cesium.Color.fromCssColorString("#fde68a");
+const BUS_STOP_PIXEL_SIZE_MINOR = BUS_STOP_PIXEL_SIZE;
 
 // 初期カメラの表示範囲（バス停群の重心を中心とした固定半径）。バス停653件全体（南北東西とも
 // 十数km）にフィットさせると、建物1棟が画面上で数ピクセルしかなく色分けがほぼ見えない状態に
@@ -407,8 +414,8 @@ function Legend() {
         <span
           style={{
             display: "inline-block",
-            width: 8,
-            height: 8,
+            width: 12,
+            height: 12,
             borderRadius: "50%",
             background: BUS_STOP_COLOR_MINOR.toCssColorString(),
             border: "1px solid rgba(255,255,255,0.6)",
