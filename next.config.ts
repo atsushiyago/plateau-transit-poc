@@ -21,6 +21,12 @@ const nextConfig: NextConfig = {
   // （実際のLAN IPは環境によって変わるため、必要に応じて自分の環境のIPを追記する）。
   allowedDevOrigins: ["192.168.*.*", "10.*.*.*"],
 
+  // Next.js開発モードの丸いインジケーター（左下に常時表示）を無効化。
+  // 画面4隅すべてを自前のUIパネル（Legend/InfoPopup/UncoloredBuildingsNote/
+  // CoverageStatsPanel）が占有しているため、位置を変えても必ずどこかと重なってしまう。
+  // 本番ビルド（next build）では元々表示されないため、実質dev時のみの見た目の問題。
+  devIndicators: false,
+
   webpack: (config) => {
     config.plugins = config.plugins || [];
     config.plugins.push(

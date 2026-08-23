@@ -1,0 +1,40 @@
+{
+  "services": [
+    {
+      "name": "天神町AIオンデマンドバス",
+      "type": "オンデマンドバス（実証実験）",
+      "operator": "神奈川中央交通（株）",
+      "startDate": "2024年6月1日〜（実証実験、2027年3月31日まで延長）",
+      "description": "既存の路線バス「天神町循環線」をAIオンデマンド化。地区内42か所の乗降ポイントをアプリ・電話予約で利用できる。バス停は物理的に存在するが日中の便数が減る「時間的空白」への対応。",
+      "sourceUrl": "https://www.city.fujisawa.kanagawa.jp/tosikei/tenjinchou_gaiyou.html",
+      "lat": 35.377678,
+      "lng": 139.462390,
+      "radiusMeters": 470,
+      "areaConfidence": "high"
+    },
+    {
+      "name": "のりあい善行",
+      "type": "乗合タクシー（会員制）",
+      "operator": "NPO法人のりあい善行（運行: フジ交通株式会社）",
+      "startDate": "運行開始から10年以上（開始年不詳）",
+      "description": "善行地区東部（亀井野団地方面・立石公園方面）で運行する会員制の乗合タクシー。中心・半径は亀井野・立石・善行駅の3点から機械的に算出した目安であり、実際の運行区域とは異なる可能性がある。",
+      "sourceUrl": "https://www.city.fujisawa.kanagawa.jp/tosikei/machizukuri/kotsu/kokyo/noriai-taxi.html",
+      "lat": 35.369243,
+      "lng": 139.476954,
+      "radiusMeters": 1500,
+      "areaConfidence": "low"
+    },
+    {
+      "name": "おでかけ六会",
+      "type": "予約型乗合タクシー（会員制）",
+      "operator": "おでかけ六会協議会",
+      "startDate": "2018年4月〜",
+      "description": "起伏が激しく道幅が狭いため路線バスが通らない六会地区西俣野北部と、駅前（六会日大前駅周辺）を結ぶ会員制の予約型乗合タクシー。中心・半径は西俣野・六会日大前駅の2点から機械的に算出した目安であり、実際の運行区域とは異なる可能性がある。",
+      "sourceUrl": "https://www.city.fujisawa.kanagawa.jp/tosikei/machizukuri/kotsu/kokyo/mutuai-noriai-taxi.html",
+      "lat": 35.379833,
+      "lng": 139.479820,
+      "radiusMeters": 900,
+      "areaConfidence": "low"
+    }
+  ]
+}

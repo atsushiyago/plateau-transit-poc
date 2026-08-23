@@ -21,30 +21,30 @@ const TERRAIN_URL = "https://tile.plateauview.mlit.go.jp/terrain";
 // ionトークンを設定しない場合はここを明示的に差し替えないとレンダリングが止まる。
 const ORTHO_URL = "https://tile.plateauview.mlit.go.jp/tiles/plateau-ortho-2023/{z}/{x}/{y}.png";
 
-// バス停データ（藤沢市北部、JR東海道線より北側のみ）。
-// 神奈川中央交通のGTFS-JPは「公共交通オープンデータチャレンジ2026」限定ライセンスの
-// APIキーが必要で、そのチャレンジの申込期間（2026年10月1日〜）がまだ開始していないため、
-// 代わりにOpenStreetMap（Overpass API、highway=bus_stop等）から抽出したデータを暫定的に使っている。
-// 事業者名の付いていないノードも多いため`operator`を絶対視せず、エリア内の全バス停として扱う。
-// 10月以降にGTFS-JPの正式データが取得できるようになったら差し替える想定（詳細はAGENTS.md参照）。
+// バス停データ（藤沢市北部、JR東海道線より北側のみ、337件）。
+// 【正式決定・データソース切替済み】当初はOpenStreetMap（Overpass API）由来のデータを暫定的に
+// 使っていたが、事業者名タグの欠落が多い（653件中72件のみ）という制約があったため、国土数値情報
+// 「バス停留所データ（P11、第3.0版、2022年度）」に切り替えた。P11は全国のバス停すべてに
+// バス事業者名（コミュニティバスは自治体名）が付与されているため、事業者不明のバス停が存在しない。
+// 神奈川中央交通のGTFS-JP自体は引き続き「公共交通オープンデータチャレンジ2026」限定ライセンスの
+// APIキーが必要で、申込期間（2026年10月1日〜）がまだ開始していないため入手不可能（詳細はAGENTS.md参照）。
 const BUS_STOPS_JSON_URL = "/data/bus-stops.json";
 
 const BUS_STOP_COLOR = Cesium.Color.fromCssColorString("#f59e0b");
 const BUS_STOP_PIXEL_SIZE = 10;
-// operatorタグが無い/その他事業者のバス停は参考表示として残しつつ、視覚的に控えめにする
-// （下記MAJOR_OPERATOR_KEYWORDSに一致する主要事業者のみが実効距離の計算対象になるため、
-// 「どのピンが計算に使われているか」が見た目で分かるようにする）。
+// 神奈川中央交通以外（コミュニティバス等、下記MAJOR_OPERATOR_KEYWORDSに一致しない事業者）の
+// バス停は参考表示として残しつつ、視覚的に控えめにする（「どのピンが実効距離の計算に
+// 使われているか」が見た目で分かるようにする）。
 // 当初は同じ#f59e0bを透明度35%にして小さく表示していたが、Cesiumのpointは背景（建物の色・
 // 地表色）と実際に合成されるため、赤い建物の上では暗く沈み、白い建物の上では薄く白っぽく、
 // 何もない地表（ortho画像未読み込み/欠損時のフォールバック色）の上では灰色がかって見えるなど、
-// 背景次第で色がバラついて見える問題があった（国土数値情報P11との突き合わせで、operatorタグの
-// 無い停留所の大半が実際には神奈中である可能性が高いと分かったこともあり、紛らわしい見た目を
-// 放置する理由がなくなった）。→ 不透明な淡いアンバー色に変更し、背景に関わらず一定の見た目になる
-// ようにした。主要事業者と同じサイズにしつつ、色相は保って「同じ系統だが未確認」と分かるようにしている。
+// 背景次第で色がバラついて見える問題があった。→ 不透明な淡いアンバー色に変更し、背景に関わらず
+// 一定の見た目になるようにした。主要事業者と同じサイズにしつつ、色相は保って
+// 「同じ系統だがその他事業者」と分かるようにしている。
 const BUS_STOP_COLOR_MINOR = Cesium.Color.fromCssColorString("#fde68a");
 const BUS_STOP_PIXEL_SIZE_MINOR = BUS_STOP_PIXEL_SIZE;
 
-// 初期カメラの表示範囲（バス停群の重心を中心とした固定半径）。バス停653件全体（南北東西とも
+// 初期カメラの表示範囲（バス停群の重心を中心とした固定半径）。バス停全件（南北東西とも
 // 十数km）にフィットさせると、建物1棟が画面上で数ピクセルしかなく色分けがほぼ見えない状態に
 // なっていた。全件を収める代わりに、重心付近の一定範囲だけを最初から映すことで、開いた直後から
 // 色分けされた建物がある程度画面いっぱいに見えるようにする（残りのエリアはズームアウト/パンして
@@ -52,19 +52,32 @@ const BUS_STOP_PIXEL_SIZE_MINOR = BUS_STOP_PIXEL_SIZE;
 const INITIAL_VIEW_RADIUS_METERS = 900;
 
 // 実効距離（アクセシビリティスコア）の計算に使う「主要事業者」の判定キーワード。
-// バス停データ653件のうちoperatorタグが付いているのは72件のみで、残り581件は
-// タグ無し（神奈中の停留所も含まれている可能性が高いが、OSM側のタグ付けが不完全なため
-// 判別できない）。operatorタグ無しを「対象外」として扱うと本来は空白地でない場所を
-// 空白地と誤判定するリスクがあるが、そのリスクを許容してでも「交通空白地」というテーマに
-// 対して意味のあるコントラスト（橙色・赤の分布）を出すことを優先した判断。
-// タグの表記ゆれ（神奈川中央交通/神奈中/ローマ字）に対応するため部分一致で判定する。
-const MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通", "神奈中", "kanatyu"];
+// P11データのバス事業者名（P11_002）は藤沢市北部エリアでは「神奈川中央交通（株）」の表記で
+// 統一されている（表記ゆれ無し。実データで確認済み）が、将来のデータ更新で法人格表記
+// （（株）の位置等）が変わる可能性を考慮し、部分一致で判定する。
+const MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通"];
 function isMajorOperatorStop(stop: BusStop): boolean {
-  if (!stop.operator) return false;
-  return MAJOR_OPERATOR_KEYWORDS.some((keyword) => stop.operator!.includes(keyword));
+  return MAJOR_OPERATOR_KEYWORDS.some((keyword) => stop.operator.includes(keyword));
 }
 
-type BusStop = { name: string; lat: number; lng: number; operator?: string | null };
+type BusRoute = { name: string; classCode: string | null };
+type BusStop = { name: string; lat: number; lng: number; operator: string; routes: BusRoute[] };
+
+// 鉄道駅データ（藤沢市北部、5駅）。新規にOverpassクエリを実行したものではなく、
+// `public/data/place-labels.json`の抽出時（AGENTS.md「地名ラベル・逆ジオコーディングについて」
+// 第1段階、railway=station/halt）で既に取得済みだった5駅（六会日大前・善行・湘南台・
+// 藤沢本町・長後）をそのまま切り出したもの。place-labels.jsonは表示用でtype情報を持たないため、
+// 判定計算用に別ファイルとして`train-stations.json`を用意している。
+const TRAIN_STATIONS_JSON_URL = "/data/train-stations.json";
+type TrainStation = { name: string; lat: number; lng: number };
+
+// 藤沢市公式の「交通空白地」定義（メンター自治体への質問への回答で確認済み、2026年8月）:
+// 「鉄道駅から600m圏、バス停から300m圏（高齢者の移動を考慮した基準）に入らないエリア」。
+// このPoCでは傾斜込みの実効距離をこの2つの閾値と比較し、どちらか一方でも満たせば
+// 「カバーされている」と判定する（OR条件）。詳細はAGENTS.md「藤沢市公式の交通空白地判定基準への
+// 切替について」参照。
+const STATION_COVERAGE_THRESHOLD_METERS = 600;
+const BUS_COVERAGE_THRESHOLD_METERS = 300;
 
 // 藤沢市内でJR東海道本線はほぼ東西に走っているため、経度ごとに路線の緯度を線形補間し、
 // 建物の緯度がそれを上回れば「北側」と判定する簡易ロジック（バス停データの北部抽出時と同じ考え方。
@@ -96,19 +109,21 @@ const SLOPE_GRADIENT_CAP = 0.4;
 // 徒歩速度の目安（分速67m ≒ 時速4km）。実効距離から推定歩行時間を出すのに使う。
 const WALK_SPEED_M_PER_MIN = 67;
 
-// 津波浸水深の色分け（plateau-poc の FLOOD_RANKS）と同じ考え方で、実効距離を5段階に色分けする。
-const ACCESSIBILITY_RANKS: { maxMeters: number; legendLabel: string; color: Cesium.Color }[] = [
-  { maxMeters: 300, legendLabel: "〜300m", color: Cesium.Color.fromCssColorString("#22c55e") },
-  { maxMeters: 600, legendLabel: "300〜600m", color: Cesium.Color.fromCssColorString("#a3e635") },
-  { maxMeters: 1000, legendLabel: "600m〜1km", color: Cesium.Color.fromCssColorString("#f59e0b") },
-  { maxMeters: 1500, legendLabel: "1〜1.5km", color: Cesium.Color.fromCssColorString("#f97316") },
-  { maxMeters: Infinity, legendLabel: "1.5km〜", color: Cesium.Color.fromCssColorString("#dc2626") },
+// 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
+// STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
+// ORで比較するための正規化で、ratio<=1ならどちらか一方の基準を満たす＝「カバーされている」。
+// ratio>1の超過分を、津波浸水深の色分け（plateau-poc の FLOOD_RANKS）と同じ考え方で
+// 赤系4段階のグラデーションに割り当てる（緑1色+赤系4段階のシンプルな2値+グラデーション）。
+const COVERAGE_RANKS: { maxRatio: number; legendLabel: string; color: Cesium.Color }[] = [
+  { maxRatio: 1, legendLabel: "カバーされている", color: Cesium.Color.fromCssColorString("#22c55e") },
+  { maxRatio: 1.5, legendLabel: "空白地（僅かに超過）", color: Cesium.Color.fromCssColorString("#fecaca") },
+  { maxRatio: 2, legendLabel: "空白地（やや遠い）", color: Cesium.Color.fromCssColorString("#f87171") },
+  { maxRatio: 3, legendLabel: "空白地（遠い）", color: Cesium.Color.fromCssColorString("#dc2626") },
+  { maxRatio: Infinity, legendLabel: "空白地（非常に遠い）", color: Cesium.Color.fromCssColorString("#7f1d1d") },
 ];
 
-function colorForEffectiveDistance(distanceMeters: number): Cesium.Color {
-  const rank =
-    ACCESSIBILITY_RANKS.find((r) => distanceMeters <= r.maxMeters) ??
-    ACCESSIBILITY_RANKS[ACCESSIBILITY_RANKS.length - 1];
+function colorForCoverageRatio(ratio: number): Cesium.Color {
+  const rank = COVERAGE_RANKS.find((r) => ratio <= r.maxRatio) ?? COVERAGE_RANKS[COVERAGE_RANKS.length - 1];
   return rank.color;
 }
 
@@ -147,9 +162,15 @@ type BuildingScoreInfo = {
   lat: number;
   lng: number;
   nearestStopName: string;
-  straightDistanceMeters: number;
-  effectiveDistanceMeters: number;
-  walkMinutes: number;
+  busStraightDistanceMeters: number;
+  busEffectiveDistanceMeters: number;
+  busWalkMinutes: number;
+  nearestStationName: string;
+  stationStraightDistanceMeters: number;
+  stationEffectiveDistanceMeters: number;
+  stationWalkMinutes: number;
+  coverageRatio: number;
+  isCovered: boolean;
   totalFloorArea: number | null;
 };
 
@@ -197,13 +218,17 @@ async function computeEffectiveDistances(
   });
 }
 
-// デマンド交通乗り場候補: アクセシビリティスコアが悪い（実効距離がACCESSIBILITY_RANKSの
-// 「600m〜1km」以上）の住宅系建物の座標にk-meansクラスタリングをかけ、クラスタ重心を
+// デマンド交通乗り場候補: 藤沢市公式の交通空白地判定（COVERAGE_RANKS参照）でカバーされていない
+// （coverageRatioが一定倍率を超える）住宅系建物の座標にk-meansクラスタリングをかけ、クラスタ重心を
 // 「新しい乗り場を置くならここ」の候補地点として提案する。
-// 対象距離の閾値・候補数は、藤沢市の担当者が現場感覚に合わせてその場で調整できるよう
+// 【方針決定】当初はバス実効距離のメートル閾値で判定していたが、藤沢市公式の交通空白地判定
+// （駅600m or バス300mのOR条件）に統一した。倍率のデフォルト1.0は「公式の空白地基準を1件でも
+// 満たさない＝空白地」に完全一致する。1.0より大きくすると「公式基準をさらに◯倍超過している、
+// より深刻なエリアだけに絞り込む」という優先順位付けツールとして機能する。
+// 対象倍率・候補数は、藤沢市の担当者が現場感覚に合わせてその場で調整できるよう
 // 左上のLegend内のスライダーで変更可能にしている（下記のuseState/refで管理。この2つの
 // 定数は初期値としてのみ使う）。
-const DEMAND_TRANSIT_GAP_THRESHOLD_METERS_DEFAULT = 600;
+const DEMAND_TRANSIT_GAP_RATIO_THRESHOLD_DEFAULT = 1.0;
 const DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT = 4;
 // クラスタリング対象の建物数がこれ未満なら候補地点を出さない（サンプルが少なすぎて
 // 「クラスタ」と呼べる状態にならないため）。
@@ -221,6 +246,34 @@ const DEMAND_TRANSIT_COLOR = "#a855f7";
 // Overpassでまとめて抽出し、public/data/place-labels.json に保存してある。
 const PLACE_LABELS_JSON_URL = "/data/place-labels.json";
 type PlaceLabel = { name: string; lat: number; lng: number };
+
+// 藤沢市が既に運行している乗合タクシー・オンデマンドバス（天神町AIオンデマンドバス、のりあい善行、
+// おでかけ六会）を、このPoCが提案する「デマンド交通乗り場候補」（紫の四角ピン）と区別できる形で
+// 地図上にオーバーレイ表示する。「このPoCは市の既存の取り組みと無関係に候補を出しているのではなく、
+// 市がまだ手を付けていない場所を見つけるための優先順位付けツールである」ことを示すための機能
+// （ユーザーからのフィードバックで追加、詳細はセッションのやり取り参照）。
+// 中心座標・半径は、各サービスの公式ページに正確な運行エリア境界（丁目リストや地図）が
+// 掲載されていなかったため、以下の方法で機械的に算出した近似値（`public/data/existing-demand-transit.json`
+// の`areaConfidence`で精度の目安を区別）:
+// - 天神町（areaConfidence: "high"）: public/data/bus-stops.json内の「天神町」始まりの停留所10件
+//   （天神町循環線の実際の停留所と一致すると考えられる）の重心・最大距離から算出
+// - のりあい善行・おでかけ六会（areaConfidence: "low"）: 公式ページに記載された行き先地名
+//   （亀井野・立石・善行駅、西俣野・六会日大前駅）をplace-labels.json/train-stations.jsonから
+//   引き、その平均座標・最大距離から算出した目安（実際の運行区域とは異なる可能性がある）
+const EXISTING_DEMAND_TRANSIT_JSON_URL = "/data/existing-demand-transit.json";
+type ExistingDemandTransitService = {
+  name: string;
+  type: string;
+  operator: string;
+  startDate: string;
+  description: string;
+  sourceUrl: string;
+  lat: number;
+  lng: number;
+  radiusMeters: number;
+  areaConfidence: "high" | "low";
+};
+const EXISTING_DEMAND_TRANSIT_COLOR = Cesium.Color.fromCssColorString("#3b82f6");
 
 // 対象エリアが藤沢市北部（東西南北とも十数km程度）に限られるため、緯度経度を
 // 単純な等距円筒図法でメートル相当のローカルXY座標に変換して使う（k-meansのユークリッド距離が
@@ -306,6 +359,27 @@ function createSquareIconDataUrl(fillColor: string, size = 28): string {
   return canvas.toDataURL();
 }
 
+// 既存の乗合タクシー・オンデマンドバスの拠点ピンを、デマンド交通候補（紫の四角）・バス停（丸だが
+// 小さい）と見た目で区別するため、円形のアイコンを生成する（四角=このPoCの提案、丸=市の既存実績、
+// という視覚的な対比を意図している）。
+function createCircleIconDataUrl(fillColor: string, size = 28): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const center = size / 2;
+  const radius = size / 2 - 3;
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  return canvas.toDataURL();
+}
+
 type PopupInfo = { title: string; lines: ReactNode[] };
 
 // Cesium標準のinfoBox/selectionIndicatorは無効化している（下記Viewer初期化オプション参照）ため、
@@ -384,11 +458,11 @@ function Legend({
         pointerEvents: "auto",
       }}
     >
-      <div style={{ fontWeight: "bold", marginBottom: 4 }}>徒歩アクセシビリティ（住宅系建物）</div>
+      <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市公式の交通空白地判定基準</div>
       <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-        最寄りバス停（主要事業者のみ）までの実効距離（傾斜考慮）
+        鉄道駅600m圏 or バス停300m圏（いずれも傾斜考慮の実効距離）のOR判定
       </div>
-      {ACCESSIBILITY_RANKS.map((rank) => (
+      {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
           <span
             style={{
@@ -430,7 +504,7 @@ function Legend({
             flexShrink: 0,
           }}
         />
-        <span>バス停（その他・事業者不明。参考表示のみ）</span>
+        <span>バス停（その他事業者・コミュニティバス。参考表示のみ）</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
         <span
@@ -443,17 +517,31 @@ function Legend({
             flexShrink: 0,
           }}
         />
-        <span>デマンド交通 乗り場候補</span>
+        <span>デマンド交通 乗り場候補（本PoCの提案）</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            background: EXISTING_DEMAND_TRANSIT_COLOR.toCssColorString(),
+            border: "1px solid rgba(255,255,255,0.6)",
+            flexShrink: 0,
+          }}
+        />
+        <span>乗合タクシー等（藤沢市が既に運行中）</span>
       </div>
       <div style={{ marginTop: 6 }}>
         <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-          <span>対象とする実効距離: {gapThreshold}m〜</span>
+          <span>対象とする空白の深刻度（公式基準の超過倍率）: {gapThreshold.toFixed(1)}倍〜</span>
         </label>
         <input
           type="range"
-          min={200}
-          max={2000}
-          step={50}
+          min={1}
+          max={3}
+          step={0.1}
           value={gapThreshold}
           onChange={(e) => onGapThresholdChange(Number(e.target.value))}
           style={{ width: "100%" }}
@@ -503,16 +591,68 @@ function UncoloredBuildingsNote() {
   );
 }
 
+// 面積カバー率（藤沢市北部エリア全体のうち、駅600m or バス300mでカバーされる面積の割合）は、
+// アプリ内でライブ計算すると藤沢市北部全域を格子点でスキャンする必要があり重いため、
+// このセッションでオフラインのPythonスクリプト（Shapelyで藤沢市行政境界ポリゴンを取得し、
+// 50m間隔の格子点21,773点をHaversine直線距離で判定。地形サンプリングはせず傾斜未考慮）で
+// 事前計算した値を定数として埋め込んでいる（2026年8月時点、`public/data/bus-stops.json`の
+// 主要事業者バス停297件・`public/data/train-stations.json`の5駅が対象）。詳細はAGENTS.md参照。
+const OFFLINE_AREA_COVERAGE_RATIO = 0.717;
+// 藤沢市公式資料の面積カバー率（藤沢市全域、メンター自治体への質問で確認）。本PoCの対象は
+// 藤沢市"北部"のみ（交通の便が比較的悪いエリアに絞って可視化する趣旨のため）なので、
+// 藤沢市全域より低めに出ること自体は想定内（詳細はAGENTS.md参照）。
+const OFFICIAL_AREA_COVERAGE_RATIO = 0.78;
+
+// 「建物カバー率」（読み込み済みの住宅系建物のうちカバーされている割合、リアルタイム）と、
+// 「面積カバー率」（上記の事前計算値）を藤沢市公式資料の数値と並べて表示する。左下は
+// 現在未使用の角（左上=Legend、右上=InfoPopup、右下=UncoloredBuildingsNote）。
+function CoverageStatsPanel({ covered, total }: { covered: number; total: number }) {
+  const buildingRatio = total > 0 ? (covered / total) * 100 : null;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 12,
+        // Cesium標準のクレジット表示（"Cesium ion"ロゴ＋著作権テキスト）が画面左下に
+        // デフォルトで表示され、bottom: 12だとこのパネルの最終行（藤沢市公式資料の行）と
+        // 重なって読めなくなっていた。クレジット表示の高さぶん余白を空けて回避する。
+        bottom: 32,
+        zIndex: 10,
+        background: "rgba(20, 20, 20, 0.75)",
+        color: "#fff",
+        padding: "8px 10px",
+        borderRadius: 6,
+        fontSize: 11,
+        lineHeight: 1.6,
+        fontFamily: "sans-serif",
+        maxWidth: 280,
+        pointerEvents: "none",
+      }}
+    >
+      <div style={{ fontWeight: "bold", marginBottom: 2 }}>カバー率（藤沢市公式基準）</div>
+      <div>
+        建物カバー率（読み込み済み{total}棟中、リアルタイム）: {buildingRatio !== null ? `${buildingRatio.toFixed(1)}%` : "計算中…"}
+      </div>
+      <div>面積カバー率（藤沢市北部・事前計算の格子点分析）: {(OFFLINE_AREA_COVERAGE_RATIO * 100).toFixed(1)}%</div>
+      <div style={{ opacity: 0.75 }}>参考: 藤沢市公式資料（市全域）: {(OFFICIAL_AREA_COVERAGE_RATIO * 100).toFixed(0)}%</div>
+    </div>
+  );
+}
+
 export default function PlateauViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const [popup, setPopup] = useState<PopupInfo | null>(null);
   const [demandTransitGapThreshold, setDemandTransitGapThreshold] = useState(
-    DEMAND_TRANSIT_GAP_THRESHOLD_METERS_DEFAULT
+    DEMAND_TRANSIT_GAP_RATIO_THRESHOLD_DEFAULT
   );
   const [demandTransitClusterCount, setDemandTransitClusterCount] = useState(
     DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT
   );
+  // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
+  // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
+  // 表示用にこのstateだけ都度setする軽量なミラー）。
+  const [coverageStats, setCoverageStats] = useState({ covered: 0, total: 0 });
   // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
   // 再レンダリングでは作り直されないため、スライダーの最新値をそのクロージャから読めるように
   // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
@@ -591,7 +731,7 @@ export default function PlateauViewer() {
       viewer.scene.globe.baseColor = Cesium.Color.DARKSLATEGRAY;
 
       // バス停をピンで表示する。ラベルは付けず、クリックで名称をポップアップ表示する
-      // （653件と数が多く、常時ラベル表示すると密集地でズームアウト時に重なりすぎるため）。
+      // （337件と数が多く、常時ラベル表示すると密集地でズームアウト時に重なりすぎるため）。
       // busStopList は自動フィット用に全件保持し、majorOperatorStopList は実効距離の
       // 計算（最寄りバス停検索）専用に主要事業者のみへ絞り込んだもの。
       const busStopPositions: Cesium.Cartesian3[] = [];
@@ -610,7 +750,7 @@ export default function PlateauViewer() {
           viewer.entities.add({
             name: stop.name,
             position,
-            properties: { isBusStop: true, operator: stop.operator ?? null, isMajorOperator: isMajor },
+            properties: { isBusStop: true, operator: stop.operator, routes: stop.routes, isMajorOperator: isMajor },
             point: {
               pixelSize: isMajor ? BUS_STOP_PIXEL_SIZE : BUS_STOP_PIXEL_SIZE_MINOR,
               color: isMajor ? BUS_STOP_COLOR : BUS_STOP_COLOR_MINOR,
@@ -634,6 +774,20 @@ export default function PlateauViewer() {
       } catch (err) {
         console.warn(
           "東海道線データの読み込みに失敗しました。建物のアクセシビリティ色分けはスキップされます。",
+          err
+        );
+      }
+
+      // 藤沢市公式の交通空白地判定（駅600m圏）に使う鉄道駅データを読み込む。
+      let trainStationList: TrainStation[] = [];
+      try {
+        const res = await fetch(TRAIN_STATIONS_JSON_URL);
+        const data: { stations: TrainStation[] } = await res.json();
+        if (cancelled) return;
+        trainStationList = data.stations;
+      } catch (err) {
+        console.warn(
+          "鉄道駅データの読み込みに失敗しました。建物のアクセシビリティ色分けはスキップされます。",
           err
         );
       }
@@ -670,20 +824,67 @@ export default function PlateauViewer() {
         console.warn("地名ラベルデータの読み込みに失敗しました。ラベル表示なしで継続します。", err);
       }
 
-      // 住宅系建物ごとに「最寄りバス停までの傾斜込み実効距離」を計算し、3D Tilesの
-      // フィーチャーを直接色分けする。buildingScoreCache は建物ID(_x,_yから作る代替IDを含む)
-      // をキーに永続化し、タイルがアンロード→再ロードされて新しいCesium3DTileFeatureインスタンスに
-      // なった場合でも地形サンプリングをやり直さずに再着色できるようにする。featureScoreMapは
+      // 藤沢市が既に運行している乗合タクシー・オンデマンドバスの拠点を、青い円ピン＋半透明の
+      // 概算エリア（円）でオーバーレイ表示する。デマンド交通候補（紫の四角、このPoCの提案）と
+      // 見た目で明確に区別することで、「市の既存の取り組みを無視して候補を出しているのではない」
+      // ことを示す（詳細は上記EXISTING_DEMAND_TRANSIT_JSON_URLのコメント参照）。
+      try {
+        const res = await fetch(EXISTING_DEMAND_TRANSIT_JSON_URL);
+        const data: { services: ExistingDemandTransitService[] } = await res.json();
+        if (cancelled) return;
+        const existingDemandTransitIconUrl = createCircleIconDataUrl(
+          EXISTING_DEMAND_TRANSIT_COLOR.toCssColorString()
+        );
+        for (const service of data.services) {
+          viewer.entities.add({
+            name: service.name,
+            position: Cesium.Cartesian3.fromDegrees(service.lng, service.lat),
+            properties: { isExistingDemandTransit: true, service },
+            // heightもheightReferenceも指定しないと、Cesiumはこのellipseを自動的に
+            // ClampToGroundのGroundPrimitiveとして地形に貼り付ける（Entity APIの標準的な挙動）。
+            // ただしこの描画方式は仕様上outline付き描画に対応していないため、outlineは付けない
+            // （付けても警告が出て無視されるだけ）。
+            ellipse: {
+              semiMinorAxis: service.radiusMeters,
+              semiMajorAxis: service.radiusMeters,
+              material: EXISTING_DEMAND_TRANSIT_COLOR.withAlpha(0.12),
+            },
+            billboard: {
+              image: existingDemandTransitIconUrl,
+              width: 20,
+              height: 20,
+              verticalOrigin: Cesium.VerticalOrigin.CENTER,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          });
+        }
+      } catch (err) {
+        console.warn("既存デマンド交通データの読み込みに失敗しました。オーバーレイ表示なしで継続します。", err);
+      }
+
+      // 住宅系建物ごとに「最寄りバス停・最寄り駅までの傾斜込み実効距離」を計算し、藤沢市公式の
+      // 交通空白地判定（駅600m or バス300mのOR）で3D Tilesのフィーチャーを直接色分けする。
+      // buildingScoreCache は建物ID(_x,_yから作る代替IDを含む)をキーに永続化し、タイルが
+      // アンロード→再ロードされて新しいCesium3DTileFeatureインスタンスになった場合でも
+      // 地形サンプリングをやり直さずに再着色できるようにする。featureScoreMapは
       // クリック時に「今画面にある生きたfeatureオブジェクト」からスコア情報を引くためのWeakMap。
       type CachedScore = { color: Cesium.Color; info: BuildingScoreInfo };
       const buildingScoreCache = new Map<string, CachedScore>();
       const featureScoreMap = new WeakMap<Cesium.Cesium3DTileFeature, BuildingScoreInfo>();
+      // カバレッジ統計パネル（画面左下）用の累計カウンタ。buildingScoreCacheに新規登録される
+      // たびに更新し、キャッシュヒット（再着色のみ）では増やさない。
+      let scoredCoveredCount = 0;
+      let scoredTotalCount = 0;
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
       // 必要があるため、候補ピンの実体（Entity）とクラスタ内訳（members）を紐付けて保持しておく
       // （クリック時に「対象建物数」「現状の平均実効距離」を即座に表示するため）。
-      type DemandTransitMember = { lat: number; lng: number; effectiveDistanceMeters: number };
+      // busEffectiveDistanceMetersを表示用に保持している（対象建物のほとんどはバス距離が
+      // カバー率のボトルネックになるため、代表的な指標として引き続きバス実効距離を見せる。
+      // 抽出基準そのものはcoverageRatioの閾値なので、駅が近くバスが遠い建物も理論上は含まれ得る）。
+      type DemandTransitMember = { lat: number; lng: number; busEffectiveDistanceMeters: number };
       type DemandTransitCandidate = {
         entity: Cesium.Entity;
         centroidLat: number;
@@ -702,8 +903,8 @@ export default function PlateauViewer() {
         if (cancelled) return;
         const gapBuildings: DemandTransitMember[] = [];
         for (const { info } of buildingScoreCache.values()) {
-          if (info.effectiveDistanceMeters > demandTransitGapThresholdRef.current) {
-            gapBuildings.push({ lat: info.lat, lng: info.lng, effectiveDistanceMeters: info.effectiveDistanceMeters });
+          if (info.coverageRatio > demandTransitGapThresholdRef.current) {
+            gapBuildings.push({ lat: info.lat, lng: info.lng, busEffectiveDistanceMeters: info.busEffectiveDistanceMeters });
           }
         }
 
@@ -760,7 +961,7 @@ export default function PlateauViewer() {
       scheduleDemandTransitRecomputeRef.current = scheduleDemandTransitRecompute;
 
       async function processTile(tile: Cesium.Cesium3DTile) {
-        if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0) return;
+        if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0 || trainStationList.length === 0) return;
         const content = tile.content;
         if (!content || content.featuresLength === 0) return;
         if (buildingScoreCache.size >= MAX_SCORED_BUILDINGS) return;
@@ -804,32 +1005,48 @@ export default function PlateauViewer() {
 
         if (candidates.length === 0) return;
 
-        // 各建物の最寄りバス停を探す。主要事業者のバス停のみを対象にする
-        // （理由は上のMAJOR_OPERATOR_KEYWORDSのコメント参照）。件数は少ないため総当たりで十分速い。
+        // 各建物の最寄りバス停・最寄り駅を探す。バス停は主要事業者のみを対象にする
+        // （理由は上のMAJOR_OPERATOR_KEYWORDSのコメント参照）。駅は5件のみなのでどちらも
+        // 総当たりで十分速い。
         const withNearest = candidates.map((c) => {
           let bestStop: BusStop | null = null;
-          let bestDist = Infinity;
+          let bestStopDist = Infinity;
           for (const stop of majorOperatorStopList) {
             const d = haversineMeters(c.lat, c.lng, stop.lat, stop.lng);
-            if (d < bestDist) {
-              bestDist = d;
+            if (d < bestStopDist) {
+              bestStopDist = d;
               bestStop = stop;
             }
           }
-          return { ...c, nearestStop: bestStop as BusStop };
+          let bestStation: TrainStation | null = null;
+          let bestStationDist = Infinity;
+          for (const station of trainStationList) {
+            const d = haversineMeters(c.lat, c.lng, station.lat, station.lng);
+            if (d < bestStationDist) {
+              bestStationDist = d;
+              bestStation = station;
+            }
+          }
+          return { ...c, nearestStop: bestStop as BusStop, nearestStation: bestStation as TrainStation };
         });
 
+        // バス用ペア・駅用ペアを1つの配列に連結し、地形サンプリングを1回のバッチ呼び出しに
+        // まとめる（既存の「タイル単位でバッチ化する」方針を維持。前半がバス、後半が駅の結果）。
         let results: EffectiveDistanceResult[];
         try {
-          results = await computeEffectiveDistances(
-            terrainProvider,
-            withNearest.map((c) => ({
-              originLat: c.lat,
-              originLng: c.lng,
-              destLat: c.nearestStop.lat,
-              destLng: c.nearestStop.lng,
-            }))
-          );
+          const busPairs = withNearest.map((c) => ({
+            originLat: c.lat,
+            originLng: c.lng,
+            destLat: c.nearestStop.lat,
+            destLng: c.nearestStop.lng,
+          }));
+          const stationPairs = withNearest.map((c) => ({
+            originLat: c.lat,
+            originLng: c.lng,
+            destLat: c.nearestStation.lat,
+            destLng: c.nearestStation.lng,
+          }));
+          results = await computeEffectiveDistances(terrainProvider, [...busPairs, ...stationPairs]);
         } catch (err) {
           console.warn(
             "傾斜計算用の地形サンプリングに失敗しました。このタイルの建物群はスコア計算をスキップします。",
@@ -839,24 +1056,45 @@ export default function PlateauViewer() {
         }
         if (cancelled) return;
 
+        const n = withNearest.length;
         withNearest.forEach((c, idx) => {
-          const { straightDistanceMeters, effectiveDistanceMeters } = results[idx];
-          const walkMinutes = effectiveDistanceMeters / WALK_SPEED_M_PER_MIN;
-          const color = colorForEffectiveDistance(effectiveDistanceMeters);
+          const { straightDistanceMeters: busStraightDistanceMeters, effectiveDistanceMeters: busEffectiveDistanceMeters } =
+            results[idx];
+          const {
+            straightDistanceMeters: stationStraightDistanceMeters,
+            effectiveDistanceMeters: stationEffectiveDistanceMeters,
+          } = results[n + idx];
+          const busWalkMinutes = busEffectiveDistanceMeters / WALK_SPEED_M_PER_MIN;
+          const stationWalkMinutes = stationEffectiveDistanceMeters / WALK_SPEED_M_PER_MIN;
+          const coverageRatio = Math.min(
+            busEffectiveDistanceMeters / BUS_COVERAGE_THRESHOLD_METERS,
+            stationEffectiveDistanceMeters / STATION_COVERAGE_THRESHOLD_METERS
+          );
+          const isCovered = coverageRatio <= 1;
+          const color = colorForCoverageRatio(coverageRatio);
           const info: BuildingScoreInfo = {
             usage: c.usage,
             lat: c.lat,
             lng: c.lng,
             nearestStopName: c.nearestStop.name,
-            straightDistanceMeters,
-            effectiveDistanceMeters,
-            walkMinutes,
+            busStraightDistanceMeters,
+            busEffectiveDistanceMeters,
+            busWalkMinutes,
+            nearestStationName: c.nearestStation.name,
+            stationStraightDistanceMeters,
+            stationEffectiveDistanceMeters,
+            stationWalkMinutes,
+            coverageRatio,
+            isCovered,
             totalFloorArea: c.totalFloorArea,
           };
           c.feature.color = color;
           buildingScoreCache.set(c.buildingId, { color, info });
           featureScoreMap.set(c.feature, info);
+          scoredTotalCount++;
+          if (isCovered) scoredCoveredCount++;
         });
+        setCoverageStats({ covered: scoredCoveredCount, total: scoredTotalCount });
 
         scheduleDemandTransitRecompute();
       }
@@ -872,11 +1110,13 @@ export default function PlateauViewer() {
         const picked = viewer.scene.pick(movement.position);
         const entity = picked?.id;
         if (entity instanceof Cesium.Entity && entity.properties?.isBusStop?.getValue()) {
-          const operator = entity.properties.operator?.getValue();
-          setPopup({
-            title: entity.name ?? "バス停",
-            lines: operator ? [`事業者: ${operator}`] : ["事業者情報なし（OSMデータ）"],
-          });
+          const operator: string = entity.properties.operator?.getValue();
+          const routes: BusRoute[] = entity.properties.routes?.getValue() ?? [];
+          const lines = [`事業者: ${operator}`];
+          if (routes.length > 0) {
+            lines.push(`系統: ${routes.map((r) => r.name).join("、")}`);
+          }
+          setPopup({ title: entity.name ?? "バス停", lines });
         } else if (entity instanceof Cesium.Entity && entity.properties?.isDemandTransitCandidate?.getValue()) {
           const candidate = demandTransitCandidates.find((c) => c.entity === entity);
           if (!candidate) {
@@ -884,7 +1124,7 @@ export default function PlateauViewer() {
           } else {
             const requestId = ++demandTransitRequestId;
             const avgCurrentDistance =
-              candidate.members.reduce((sum, m) => sum + m.effectiveDistanceMeters, 0) / candidate.members.length;
+              candidate.members.reduce((sum, m) => sum + m.busEffectiveDistanceMeters, 0) / candidate.members.length;
 
             // 地区名（逆ジオコーディング）と実効距離の再計算は互いに独立した非同期処理で、
             // 完了したほうから順にポップアップへ反映する。両方の最新状態をこの2変数で保持し、
@@ -894,7 +1134,7 @@ export default function PlateauViewer() {
             const buildLines = () => [
               `推定地区名: ${areaNameText}`,
               `対象建物数: ${candidate.members.length}棟`,
-              `現状の平均実効距離: 約${Math.round(avgCurrentDistance)}m`,
+              `現状の平均実効距離（バス基準）: 約${Math.round(avgCurrentDistance)}m`,
               newDistanceLine,
             ];
 
@@ -946,16 +1186,30 @@ export default function PlateauViewer() {
               }
             })();
           }
+        } else if (entity instanceof Cesium.Entity && entity.properties?.isExistingDemandTransit?.getValue()) {
+          const service: ExistingDemandTransitService = entity.properties.service.getValue();
+          setPopup({
+            title: service.name,
+            lines: [
+              `種別: ${service.type}`,
+              `事業者: ${service.operator}`,
+              `運行開始: ${service.startDate}`,
+              service.description,
+              ...(service.areaConfidence === "low" ? ["（円の範囲は目安。正確な運行区域とは異なる）"] : []),
+              <a key="src" href={service.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "#93c5fd" }}>
+                藤沢市公式ページ
+              </a>,
+            ],
+          });
         } else if (picked instanceof Cesium.Cesium3DTileFeature) {
           const info = featureScoreMap.get(picked);
           if (info) {
             setPopup({
               title: info.usage,
               lines: [
-                `最寄りバス停: ${info.nearestStopName}`,
-                `直線距離: 約${Math.round(info.straightDistanceMeters)}m`,
-                `実効距離（傾斜考慮）: 約${Math.round(info.effectiveDistanceMeters)}m`,
-                `徒歩時間目安: 約${Math.round(info.walkMinutes)}分`,
+                `判定: ${info.isCovered ? "カバーされている" : "交通空白地"}`,
+                `最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
+                `最寄り鉄道駅: ${info.nearestStationName}（実効距離 約${Math.round(info.stationEffectiveDistanceMeters)}m・徒歩${Math.round(info.stationWalkMinutes)}分）`,
                 ...(info.totalFloorArea != null ? [`延床面積: 約${Math.round(info.totalFloorArea)}m²`] : []),
               ],
             });
@@ -976,7 +1230,7 @@ export default function PlateauViewer() {
         const centroid = Cesium.BoundingSphere.fromPoints(busStopPositions).center;
         const sphere = new Cesium.BoundingSphere(centroid, INITIAL_VIEW_RADIUS_METERS);
         viewer.camera.flyToBoundingSphere(sphere, {
-          offset: new Cesium.HeadingPitchRange(Cesium.Math.toRadians(20), Cesium.Math.toRadians(-30), 0),
+          offset: new Cesium.HeadingPitchRange(Cesium.Math.toRadians(20), Cesium.Math.toRadians(-30)),
         });
       }
     }
@@ -1007,6 +1261,7 @@ export default function PlateauViewer() {
         }}
       />
       <UncoloredBuildingsNote />
+      <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
       {popup && <InfoPopup info={popup} onClose={() => setPopup(null)} />}
     </div>
   );
