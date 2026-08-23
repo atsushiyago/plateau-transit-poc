@@ -101,13 +101,25 @@ const RESIDENTIAL_USAGE_SUBSTRING = "住宅";
 const MAX_SCORED_BUILDINGS = 20000;
 // 建物〜最寄りバス停の直線を何点でサンプリングして傾斜を求めるか（区間数はこの値-1）。
 const SLOPE_SAMPLE_COUNT = 5;
-// 勾配(標高差/区間距離)1あたり実効距離を何倍割り増しするかの係数。例: 勾配0.1(10%)なら
-// SLOPE_PENALTY_FACTOR=3で実効距離が1.3倍になる。シンプルな線形モデルで十分という要件に基づく。
-const SLOPE_PENALTY_FACTOR = 3;
-// 地形データのノイズで極端な勾配が出た場合の上限（40%勾配で頭打ち）。
+// 地形データのノイズで極端な勾配が出た場合の上限（40%勾配で頭打ち）。プロファイルに関わらず共通。
 const SLOPE_GRADIENT_CAP = 0.4;
-// 徒歩速度の目安（分速67m ≒ 時速4km）。実効距離から推定歩行時間を出すのに使う。
-const WALK_SPEED_M_PER_MIN = 67;
+
+// 勾配への感度・歩行速度を「一般」「高齢者（坂道に配慮）」の2プロファイルで切り替えられるようにする。
+// 【追加の経緯】メンター自治体（藤沢市、丹野氏）から「北部エリアは高齢化率が加速している地域なので、
+// 年齢層に応じた交通空白地の考え方（高低差の重み付け）があってよいのでは」という提案を受けて実装。
+// 【重要な注記】ここの係数は医学的・工学的な実測値に基づくものではなく、あくまで目安の設定である:
+// - walkSpeedMPerMin: 高齢者の分速50m（時速3km）は、バリアフリー設計で参考にされることが多い一般的な値
+// - slopePenaltyFactor: 「坂道への負荷が一般よりも大きい」という定性的な方向性を、一般の2倍という
+//   単純な係数で表現しただけで、根拠となる調査データがあるわけではない
+// 実務利用の際は、藤沢市側の知見（バス・鉄道担当者と共有予定とのこと）を踏まえて調整することを想定している。
+type WalkProfile = "general" | "elderly";
+const WALK_PROFILES: Record<WalkProfile, { label: string; slopePenaltyFactor: number; walkSpeedMPerMin: number }> = {
+  // 勾配1あたり実効距離を何倍割り増しするかの係数。例: 勾配0.1(10%)ならslopePenaltyFactor=3で
+  // 実効距離が1.3倍になる。徒歩速度は分速67m≒時速4kmが一般的な成人の目安。
+  general: { label: "一般", slopePenaltyFactor: 3, walkSpeedMPerMin: 67 },
+  elderly: { label: "高齢者（坂道に配慮）", slopePenaltyFactor: 6, walkSpeedMPerMin: 50 },
+};
+const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
@@ -172,6 +184,7 @@ type BuildingScoreInfo = {
   coverageRatio: number;
   isCovered: boolean;
   totalFloorArea: number | null;
+  walkProfileLabel: string;
 };
 
 // 2点間の傾斜込み実効距離を計算する共通ロジック。住宅系建物の色分け（最寄りバス停まで）と、
@@ -182,7 +195,8 @@ type EffectiveDistanceResult = { straightDistanceMeters: number; effectiveDistan
 
 async function computeEffectiveDistances(
   terrainProvider: Cesium.TerrainProvider,
-  pairs: EffectiveDistancePair[]
+  pairs: EffectiveDistancePair[],
+  slopePenaltyFactor: number
 ): Promise<EffectiveDistanceResult[]> {
   const straightDistances = pairs.map((p) => haversineMeters(p.originLat, p.originLng, p.destLat, p.destLng));
 
@@ -212,7 +226,7 @@ async function computeEffectiveDistances(
     for (let k = 0; k < heights.length - 1; k++) {
       const rise = Math.abs(heights[k + 1] - heights[k]);
       const gradient = Math.min(rise / Math.max(segmentDistance, 1), SLOPE_GRADIENT_CAP);
-      effectiveDistanceMeters += segmentDistance * (1 + SLOPE_PENALTY_FACTOR * gradient);
+      effectiveDistanceMeters += segmentDistance * (1 + slopePenaltyFactor * gradient);
     }
     return { straightDistanceMeters, effectiveDistanceMeters };
   });
@@ -469,16 +483,20 @@ function Legend({
   gapThreshold,
   clusterCount,
   showHelloCycling,
+  walkProfile,
   onGapThresholdChange,
   onClusterCountChange,
   onShowHelloCyclingChange,
+  onWalkProfileChange,
 }: {
   gapThreshold: number;
   clusterCount: number;
   showHelloCycling: boolean;
+  walkProfile: WalkProfile;
   onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
   onShowHelloCyclingChange: (value: boolean) => void;
+  onWalkProfileChange: (value: WalkProfile) => void;
 }) {
   return (
     <div
@@ -519,6 +537,20 @@ function Legend({
           <span>{rank.legendLabel}</span>
         </div>
       ))}
+      <div style={{ marginTop: 4 }}>
+        <div style={{ opacity: 0.85, marginBottom: 2 }}>勾配・歩行速度のプロファイル:</div>
+        {(Object.keys(WALK_PROFILES) as WalkProfile[]).map((key) => (
+          <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="walkProfile"
+              checked={walkProfile === key}
+              onChange={() => onWalkProfileChange(key)}
+            />
+            <span>{WALK_PROFILES[key].label}</span>
+          </label>
+        ))}
+      </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", margin: "8px 0 6px" }} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
         <span
@@ -720,6 +752,10 @@ export default function PlateauViewer() {
   // 方式を踏襲するが、こちらは再クラスタリングのような重い再計算が不要なため、
   // helloCyclingEntitiesRefに保持した各エンティティのentity.showを直接切り替えるだけで済む。
   const [showHelloCycling, setShowHelloCycling] = useState(true);
+  // 勾配感度・歩行速度のプロファイル（「一般」/「高齢者」）。切り替えるとbuildingScoreCacheが
+  // 全建物ぶん無効化され、読み込み済みの建物すべてを新しいプロファイルで再計算する（詳細は
+  // applyWalkProfileのコメント参照）。
+  const [walkProfile, setWalkProfile] = useState<WalkProfile>(WALK_PROFILE_DEFAULT);
   // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
@@ -729,13 +765,21 @@ export default function PlateauViewer() {
   // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
   const demandTransitGapThresholdRef = useRef(demandTransitGapThreshold);
   const demandTransitClusterCountRef = useRef(demandTransitClusterCount);
+  const walkProfileRef = useRef(walkProfile);
   useEffect(() => {
     demandTransitGapThresholdRef.current = demandTransitGapThreshold;
     demandTransitClusterCountRef.current = demandTransitClusterCount;
-  }, [demandTransitGapThreshold, demandTransitClusterCount]);
+    walkProfileRef.current = walkProfile;
+  }, [demandTransitGapThreshold, demandTransitClusterCount, walkProfile]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
+  // プロファイル切り替えのonChangeから呼べるようにするための橋渡し。walkProfileRef.currentを
+  // 同期的に更新してからbuildingScoreCacheを無効化・再計算するため、上のuseEffect経由の
+  // 非同期な同期だと間に合わない（イベントハンドラ内でsetWalkProfileした直後にこの関数を
+  // 呼ぶと、re-render前なのでuseEffectがまだ走っていない）。そのためinit()側の関数自身が
+  // walkProfileRef.currentを直接書き換える。
+  const applyWalkProfileRef = useRef<((profile: WalkProfile) => void) | null>(null);
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -985,6 +1029,17 @@ export default function PlateauViewer() {
       // たびに更新し、キャッシュヒット（再着色のみ）では増やさない。
       let scoredCoveredCount = 0;
       let scoredTotalCount = 0;
+      // 勾配プロファイル（一般/高齢者）切り替え用の「世代」カウンタ。applyWalkProfileが
+      // 呼ばれるたびに+1し、buildingScoreCacheを空にする。tileScannedGenerationは
+      // 「このタイルを最後に処理したときの世代」をタイルごとに記録するWeakMapで、
+      // processTileIfNeeded（tileLoad/tileVisible両方から呼ばれる）が「このタイルは
+      // 現在の世代でまだ処理していない」ときだけ実際のprocessTileを呼ぶためのガードに使う。
+      // Cesium3DTilesetには「現在ロード済みの全タイルを走査する」ような公開APIが無いため、
+      // 代わりにtileVisible（画面に映るたびに毎フレーム発火するイベント）に安価なチェックだけ
+      // 常時ぶら下げておき、世代が古いタイルが画面に映った瞬間に自己修復的に再計算させる方式にした
+      // （オフスクリーンのタイルも、後で画面に戻ってきたときに正しく新しい世代で再計算される）。
+      let scoreGeneration = 0;
+      const tileScannedGeneration = new WeakMap<Cesium.Cesium3DTile, number>();
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
@@ -1141,6 +1196,10 @@ export default function PlateauViewer() {
 
         // バス用ペア・駅用ペアを1つの配列に連結し、地形サンプリングを1回のバッチ呼び出しに
         // まとめる（既存の「タイル単位でバッチ化する」方針を維持。前半がバス、後半が駅の結果）。
+        // 勾配感度（プロファイル）はこの時点のwalkProfileRef.currentを使う。プロファイル切替時は
+        // applyWalkProfileがbuildingScoreCacheを空にしてから全読み込み済みタイルでprocessTileを
+        // 呼び直すため、ここで最新の値を読めば自動的に新プロファイルで再計算される。
+        const profile = WALK_PROFILES[walkProfileRef.current];
         let results: EffectiveDistanceResult[];
         try {
           const busPairs = withNearest.map((c) => ({
@@ -1155,7 +1214,11 @@ export default function PlateauViewer() {
             destLat: c.nearestStation.lat,
             destLng: c.nearestStation.lng,
           }));
-          results = await computeEffectiveDistances(terrainProvider, [...busPairs, ...stationPairs]);
+          results = await computeEffectiveDistances(
+            terrainProvider,
+            [...busPairs, ...stationPairs],
+            profile.slopePenaltyFactor
+          );
         } catch (err) {
           console.warn(
             "傾斜計算用の地形サンプリングに失敗しました。このタイルの建物群はスコア計算をスキップします。",
@@ -1173,8 +1236,8 @@ export default function PlateauViewer() {
             straightDistanceMeters: stationStraightDistanceMeters,
             effectiveDistanceMeters: stationEffectiveDistanceMeters,
           } = results[n + idx];
-          const busWalkMinutes = busEffectiveDistanceMeters / WALK_SPEED_M_PER_MIN;
-          const stationWalkMinutes = stationEffectiveDistanceMeters / WALK_SPEED_M_PER_MIN;
+          const busWalkMinutes = busEffectiveDistanceMeters / profile.walkSpeedMPerMin;
+          const stationWalkMinutes = stationEffectiveDistanceMeters / profile.walkSpeedMPerMin;
           const coverageRatio = Math.min(
             busEffectiveDistanceMeters / BUS_COVERAGE_THRESHOLD_METERS,
             stationEffectiveDistanceMeters / STATION_COVERAGE_THRESHOLD_METERS
@@ -1196,6 +1259,7 @@ export default function PlateauViewer() {
             coverageRatio,
             isCovered,
             totalFloorArea: c.totalFloorArea,
+            walkProfileLabel: profile.label,
           };
           c.feature.color = color;
           buildingScoreCache.set(c.buildingId, { color, info });
@@ -1208,9 +1272,33 @@ export default function PlateauViewer() {
         scheduleDemandTransitRecompute();
       }
 
-      tileset?.tileLoad.addEventListener((tile: Cesium.Cesium3DTile) => {
+      // tileLoad（新規タイルの読み込み完了時）・tileVisible（タイルが画面に映るたびに毎フレーム
+      // 発火）の両方からこのラッパー経由でprocessTileを呼ぶ。tileScannedGenerationに
+      // 記録した「最後に処理した世代」が現在のscoreGenerationと一致していれば何もしない
+      // （WeakMap.get + 比較だけの安価なチェックなので、tileVisibleの高頻度発火でも問題にならない）。
+      function processTileIfNeeded(tile: Cesium.Cesium3DTile) {
+        if (tileScannedGeneration.get(tile) === scoreGeneration) return;
+        tileScannedGeneration.set(tile, scoreGeneration);
         void processTile(tile);
-      });
+      }
+      tileset?.tileLoad.addEventListener(processTileIfNeeded);
+      tileset?.tileVisible.addEventListener(processTileIfNeeded);
+
+      // 勾配プロファイル（一般/高齢者）が切り替わったときに呼ぶ。実効距離・coverageRatioは
+      // プロファイルに依存するため、buildingScoreCacheに入っている既存の計算結果はすべて古くなる。
+      // scoreGenerationを進めてキャッシュを空にするだけで、実際の再計算はprocessTileIfNeededが
+      // tileVisibleイベント経由で自己修復的に行う（画面内のタイルは次のフレームで、画面外の
+      // タイルも後で映ったときに正しく再計算される）。
+      function applyWalkProfile(profile: WalkProfile) {
+        walkProfileRef.current = profile;
+        scoreGeneration++;
+        buildingScoreCache.clear();
+        scoredCoveredCount = 0;
+        scoredTotalCount = 0;
+        setCoverageStats({ covered: 0, total: 0 });
+        scheduleDemandTransitRecompute();
+      }
+      applyWalkProfileRef.current = applyWalkProfile;
 
       // Cesium標準のクリック選択（selectionIndicator/infoBox）は無効化しているため、
       // バス停・建物クリック時の情報表示は自前のInfoPopupで行う。
@@ -1279,7 +1367,8 @@ export default function PlateauViewer() {
                     originLng: m.lng,
                     destLat: candidate.centroidLat,
                     destLng: candidate.centroidLng,
-                  }))
+                  })),
+                  WALK_PROFILES[walkProfileRef.current].slopePenaltyFactor
                 );
                 // 計算中に別の候補がクリックされていたら、この結果は捨てて何もしない。
                 if (cancelled || requestId !== demandTransitRequestId) return;
@@ -1326,6 +1415,7 @@ export default function PlateauViewer() {
                 `最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
                 `最寄り鉄道駅: ${info.nearestStationName}（実効距離 約${Math.round(info.stationEffectiveDistanceMeters)}m・徒歩${Math.round(info.stationWalkMinutes)}分）`,
                 ...(info.totalFloorArea != null ? [`延床面積: 約${Math.round(info.totalFloorArea)}m²`] : []),
+                `プロファイル: ${info.walkProfileLabel}`,
               ],
             });
           } else {
@@ -1355,6 +1445,7 @@ export default function PlateauViewer() {
     return () => {
       cancelled = true;
       scheduleDemandTransitRecomputeRef.current = null;
+      applyWalkProfileRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -1368,6 +1459,7 @@ export default function PlateauViewer() {
         gapThreshold={demandTransitGapThreshold}
         clusterCount={demandTransitClusterCount}
         showHelloCycling={showHelloCycling}
+        walkProfile={walkProfile}
         onGapThresholdChange={(value) => {
           setDemandTransitGapThreshold(value);
           scheduleDemandTransitRecomputeRef.current?.();
@@ -1377,6 +1469,10 @@ export default function PlateauViewer() {
           scheduleDemandTransitRecomputeRef.current?.();
         }}
         onShowHelloCyclingChange={setShowHelloCycling}
+        onWalkProfileChange={(value) => {
+          setWalkProfile(value);
+          applyWalkProfileRef.current?.(value);
+        }}
       />
       <UncoloredBuildingsNote />
       <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
