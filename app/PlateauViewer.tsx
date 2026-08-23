@@ -275,6 +275,20 @@ type ExistingDemandTransitService = {
 };
 const EXISTING_DEMAND_TRANSIT_COLOR = Cesium.Color.fromCssColorString("#3b82f6");
 
+// ハローサイクリング（OpenStreet株式会社）のシェアサイクルステーションを地図上に表示する。
+// データ出典: ODPT（公共交通オープンデータセンター）のGBFS形式データ。GTFS-JPと違い
+// 「公共交通オープンデータチャレンジ2026限定ライセンス」の対象外で、通常のODPTセンター
+// アクセストークンで取得できる常時公開データ（詳細はREADME.mdのクレジット表記参照）。
+// ライセンス: CC BY 4.0 / ODC BY 1.0 / ODbL 1.0。
+// アクセストークンをクライアントに露出させないよう、/api/hellocycling-stations
+// （サーバーサイドプロキシ）経由で取得する。北部エリアへの絞り込み（バウンディングボックス＋
+// 東海道線より北）もこのAPIルート側で行っている。
+// 【現段階のスコープ】表示のみで、coverageRatio等の色分けロジックには組み込んでいない
+// （ユーザーからの明示的な指示）。
+const HELLO_CYCLING_STATIONS_API_URL = "/api/hellocycling-stations";
+type HelloCyclingStation = { id: string; name: string; lat: number; lng: number; capacity: number | null };
+const HELLO_CYCLING_COLOR = "#facc15";
+
 // 対象エリアが藤沢市北部（東西南北とも十数km程度）に限られるため、緯度経度を
 // 単純な等距円筒図法でメートル相当のローカルXY座標に変換して使う（k-meansのユークリッド距離が
 // 経度方向で不当に圧縮/伸長されるのを避けるため。全国精度は不要という他の判定と同じ方針）。
@@ -380,6 +394,30 @@ function createCircleIconDataUrl(fillColor: string, size = 28): string {
   return canvas.toDataURL();
 }
 
+// ハローサイクリングのステーションピンを、バス停（丸）・既存デマンド交通（青丸）と見た目で
+// 区別するため、黄色い円に自転車の絵文字を重ねたアイコンを生成する。
+function createBicycleIconDataUrl(fillColor: string, size = 28): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const center = size / 2;
+  const radius = size / 2 - 3;
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.font = `${Math.round(size * 0.6)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("🚲", center, center + 1);
+  return canvas.toDataURL();
+}
+
 type PopupInfo = { title: string; lines: ReactNode[] };
 
 // Cesium標準のinfoBox/selectionIndicatorは無効化している（下記Viewer初期化オプション参照）ため、
@@ -430,13 +468,17 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
 function Legend({
   gapThreshold,
   clusterCount,
+  showHelloCycling,
   onGapThresholdChange,
   onClusterCountChange,
+  onShowHelloCyclingChange,
 }: {
   gapThreshold: number;
   clusterCount: number;
+  showHelloCycling: boolean;
   onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
+  onShowHelloCyclingChange: (value: boolean) => void;
 }) {
   return (
     <div
@@ -533,6 +575,20 @@ function Legend({
         />
         <span>乗合タクシー等（藤沢市が既に運行中）</span>
       </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            background: HELLO_CYCLING_COLOR,
+            border: "1px solid rgba(255,255,255,0.6)",
+            flexShrink: 0,
+          }}
+        />
+        <span>ハローサイクリング ステーション</span>
+      </div>
       <div style={{ marginTop: 6 }}>
         <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
           <span>対象とする空白の深刻度（公式基準の超過倍率）: {gapThreshold.toFixed(1)}倍〜</span>
@@ -560,6 +616,16 @@ function Legend({
           onChange={(e) => onClusterCountChange(Number(e.target.value))}
           style={{ width: "100%" }}
         />
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={showHelloCycling}
+            onChange={(e) => onShowHelloCyclingChange(e.target.checked)}
+          />
+          <span>ハローサイクリング ステーションを表示</span>
+        </label>
       </div>
     </div>
   );
@@ -649,6 +715,11 @@ export default function PlateauViewer() {
   const [demandTransitClusterCount, setDemandTransitClusterCount] = useState(
     DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT
   );
+  // ハローサイクリングのステーションピンの表示/非表示トグル（デフォルトON）。既存のスライダーと
+  // 同じ「Legend内のUIでReact stateを変更し、init()内で作られたCesiumエンティティに反映する」
+  // 方式を踏襲するが、こちらは再クラスタリングのような重い再計算が不要なため、
+  // helloCyclingEntitiesRefに保持した各エンティティのentity.showを直接切り替えるだけで済む。
+  const [showHelloCycling, setShowHelloCycling] = useState(true);
   // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
@@ -665,6 +736,14 @@ export default function PlateauViewer() {
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
+  // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
+  // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
+  const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
+  useEffect(() => {
+    for (const entity of helloCyclingEntitiesRef.current) {
+      entity.show = showHelloCycling;
+    }
+  }, [showHelloCycling]);
 
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) return;
@@ -861,6 +940,36 @@ export default function PlateauViewer() {
         }
       } catch (err) {
         console.warn("既存デマンド交通データの読み込みに失敗しました。オーバーレイ表示なしで継続します。", err);
+      }
+
+      // ハローサイクリングのステーションを黄色い自転車ピンで表示する（表示のみ、色分けロジックには
+      // 未組み込み）。/api/hellocycling-stations はサーバー側でODPT_CONSUMER_KEYが未設定の場合や
+      // ODPT側のエラー時に500/502を返すが、いずれもこのアプリの他の機能には影響しないため、
+      // 失敗時はconsole.warnのみでピン無しのまま継続する。
+      try {
+        const res = await fetch(HELLO_CYCLING_STATIONS_API_URL);
+        if (!res.ok) throw new Error(`hellocycling-stations API returned ${res.status}`);
+        const data: { stations: HelloCyclingStation[] } = await res.json();
+        if (cancelled) return;
+        const bicycleIconUrl = createBicycleIconDataUrl(HELLO_CYCLING_COLOR);
+        for (const station of data.stations) {
+          const entity = viewer.entities.add({
+            name: station.name,
+            position: Cesium.Cartesian3.fromDegrees(station.lng, station.lat),
+            properties: { isHelloCyclingStation: true, capacity: station.capacity },
+            billboard: {
+              image: bicycleIconUrl,
+              width: 22,
+              height: 22,
+              verticalOrigin: Cesium.VerticalOrigin.CENTER,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          });
+          helloCyclingEntitiesRef.current.push(entity);
+        }
+      } catch (err) {
+        console.warn("ハローサイクリングのステーションデータの読み込みに失敗しました。ピン表示なしで継続します。", err);
       }
 
       // 住宅系建物ごとに「最寄りバス停・最寄り駅までの傾斜込み実効距離」を計算し、藤沢市公式の
@@ -1201,6 +1310,12 @@ export default function PlateauViewer() {
               </a>,
             ],
           });
+        } else if (entity instanceof Cesium.Entity && entity.properties?.isHelloCyclingStation?.getValue()) {
+          const capacity: number | null = entity.properties.capacity?.getValue() ?? null;
+          setPopup({
+            title: entity.name ?? "ハローサイクリング ステーション",
+            lines: [...(capacity != null ? [`収容可能台数: ${capacity}台`] : [])],
+          });
         } else if (picked instanceof Cesium.Cesium3DTileFeature) {
           const info = featureScoreMap.get(picked);
           if (info) {
@@ -1240,6 +1355,7 @@ export default function PlateauViewer() {
     return () => {
       cancelled = true;
       scheduleDemandTransitRecomputeRef.current = null;
+      helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
     };
@@ -1251,6 +1367,7 @@ export default function PlateauViewer() {
       <Legend
         gapThreshold={demandTransitGapThreshold}
         clusterCount={demandTransitClusterCount}
+        showHelloCycling={showHelloCycling}
         onGapThresholdChange={(value) => {
           setDemandTransitGapThreshold(value);
           scheduleDemandTransitRecomputeRef.current?.();
@@ -1259,6 +1376,7 @@ export default function PlateauViewer() {
           setDemandTransitClusterCount(value);
           scheduleDemandTransitRecomputeRef.current?.();
         }}
+        onShowHelloCyclingChange={setShowHelloCycling}
       />
       <UncoloredBuildingsNote />
       <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
