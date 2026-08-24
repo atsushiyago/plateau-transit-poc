@@ -545,6 +545,11 @@ function Legend({
         // UncoloredBuildingsNote等の純粋な装飾パネルとは異なりpointerEventsを有効にしている
         // （画面左上の固定サイズの小さな箱の中だけなので、他の地図操作の妨げにはならない）。
         pointerEvents: "auto",
+        // maxWidthを明示しないと、幅制約の無い長文（距離モデルの説明文など）を子要素に
+        // 追加したときに、absolute配置のshrink-to-fit計算でパネル全体が画面横幅いっぱいまで
+        // 広がってしまう不具合が実際に発生した。他のパネル（InfoPopup/CoverageStatsPanel）と
+        // 同様にmaxWidthで頭打ちにしておく。
+        maxWidth: 320,
       }}
     >
       <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市公式の交通空白地判定基準</div>

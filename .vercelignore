@@ -1,0 +1,13 @@
+# Vercel CLIのアップロード対象からの除外。.gitignoreと重複する内容だが、
+# vercel deploy時にscripts/road-network/venv（472MB）・road_network.graphml（128MB、
+# Vercelの単一ファイル100MB上限を超過）・cache（52MB）が実際にアップロードされてデプロイが
+# 失敗した（2026-08-25、feature/road-network-distanceブランチのプレビューデプロイ時に発覚）。
+# .gitignoreだけでは確実にvercel CLIの除外対象にならなかったため、明示的に指定する。
+scripts/road-network/venv/
+scripts/road-network/cache/
+scripts/road-network/__pycache__/
+scripts/road-network/*.graphml
+scripts/road-network/*.pkl
+scripts/road-network/buildings.json
+scripts/road-network/buildings_sample.json
+scripts/road-network/sample_scores.json
