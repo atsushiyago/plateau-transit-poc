@@ -4,12 +4,11 @@
 処理の流れ:
 1. 建物（01の出力）・バス停（既存public/data/bus-stops.json、主要事業者のみ）・
    鉄道駅（既存public/data/train-stations.json）・道路網（02の出力）を読み込む
-2. 建物・バス停・駅をそれぞれ最寄りの道路網ノードにスナップする（ox.distance.nearest_nodes）
-   - 【簡略化した点】道路"エッジ"への投影ではなく、最寄り"ノード"へのスナップにしている。
-     このエリアの道路網はノード密度が高い（55,849ノード、平均間隔約50m）ため、エッジ投影との
-     差は実用上小さいと判断した。建物・停留所の実座標とスナップ先ノード座標との間の直線距離
-     （「道路からの最後の直線区間」）は別途加算するので、「スナップ」自体の意味は保たれている。
-3. バス停用・駅用それぞれに仮想スーパーソースノードを追加し（各停留所のスナップ先ノードへ
+2. 建物・バス停・駅をそれぞれ最寄りの道路網「エッジ上の点」にスナップする（edge_snap.EdgeSnapper。
+   最寄り"ノード"へのスナップだと、停留所からわずか数十mしか離れていない建物でも経路距離が
+   数百m跳ね上がる問題があったため、エッジへの垂線投影＋仮想ノード挿入方式に変更した。
+   詳細はREADME.md参照）
+3. バス停用・駅用それぞれに仮想スーパーソースノードを追加し（各停留所の仮想スナップノードへ
    重み0のエッジを張る）、そこから1回のダイクストラ法で全ノードへの最短経路距離・経路を一括計算する
    （建物ごとに逐一「最寄りのバス停」を直線距離で決め打ちしてから経路探索するのではなく、
    ネットワーク上で本当に最も近い停留所を見つけるのが目的）
@@ -24,6 +23,7 @@
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -32,6 +32,7 @@ import networkx as nx
 import osmnx as ox
 
 sys.path.insert(0, str(Path(__file__).parent))
+from edge_snap import EdgeSnapper  # noqa: E402
 from elevation import ElevationProvider  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).parent
@@ -51,8 +52,6 @@ WALK_PROFILES = {
     "general": {"slopePenaltyFactor": 3, "walkSpeedMPerMin": 67},
     "elderly": {"slopePenaltyFactor": 6, "walkSpeedMPerMin": 50},
 }
-
-import math
 
 
 def haversine_m(lat1, lng1, lat2, lng2):
@@ -79,32 +78,39 @@ def effective_distance(coords, elevations, slope_penalty_factor):
     return total
 
 
-def build_supersource_routes(G_undirected, snap_nodes_with_names):
+def insert_virtual_nodes(G, snapper, points, id_prefix):
     """
-    snap_nodes_with_names: [(name, node_id, actual_lat, actual_lng), ...]
-    同じnodeに複数の停留所がスナップしている場合、実座標との最後の直線区間が最小のものを
-    「その経由ノードでの代表停留所」として選ぶ。
-    戻り値: (合成グラフ, スーパーソースID, node -> (name, lastMileM, lat, lng) の代表停留所辞書)
-
-    【重要】(name, lastMileM)に加えて停留所の実座標(lat, lng)もここで直接保持しておく。
-    「住宅前」のように同名の停留所が藤沢市内に複数（離れた場所に）存在するため、後段で
-    停留所名から元データを引き直すと誤った（同名だが全く別の場所の）停留所の座標を
-    拾ってしまい、実効距離が桁違いに跳ね上がるバグを実際に踏んだ（デバッグ時に発見）。
+    points: [(lat, lng), ...]
+    各点をedge_snap.EdgeSnapperでエッジ上にスナップし、Gに仮想ノードとして挿入する
+    （u・vそれぞれへ按分した距離のエッジを張るだけで、元のu-vエッジはそのまま残す。
+    按分の合計が元のエッジ長と一致するため、これはショートカットにならない）。
+    戻り値: [(virtual_id, snap_lat, snap_lng, perp_dist_m), ...]（pointsと同じ順序）
     """
-    node_to_best = {}
-    for name, node, lat, lng in snap_nodes_with_names:
-        node_lat, node_lng = G_undirected.nodes[node]["y"], G_undirected.nodes[node]["x"]
-        last_mile = haversine_m(lat, lng, node_lat, node_lng)
-        cur = node_to_best.get(node)
-        if cur is None or last_mile < cur[1]:
-            node_to_best[node] = (name, last_mile, lat, lng)
+    lats = [p[0] for p in points]
+    lngs = [p[1] for p in points]
+    snapped = snapper.snap_batch(lats, lngs)
 
-    H = nx.MultiGraph(G_undirected)
+    out = []
+    for i, (u, v, key, snap_lat, snap_lng, dist_to_u, dist_to_v, perp) in enumerate(snapped):
+        vid = f"{id_prefix}{i}"
+        G.add_node(vid, y=snap_lat, x=snap_lng)
+        G.add_edge(vid, u, length=dist_to_u)
+        G.add_edge(vid, v, length=dist_to_v)
+        out.append((vid, snap_lat, snap_lng, perp))
+    return out
+
+
+def run_supersource_dijkstra(G, virtual_ids):
+    """Gに一時的にスーパーソースを追加し、virtual_idsへの重み0エッジを張ってダイクストラを実行、
+    完了後はスーパーソースを取り除く（Gをグローバルに使い回すため、後続の駅側計算に影響しないよう
+    後始末する）。"""
     super_id = "__SUPER__"
-    H.add_node(super_id, y=None, x=None)
-    for node in node_to_best:
-        H.add_edge(super_id, node, length=0.0)
-    return H, super_id, node_to_best
+    G.add_node(super_id)
+    for vid in virtual_ids:
+        G.add_edge(super_id, vid, length=0.0)
+    dist, paths = nx.single_source_dijkstra(G, super_id, weight="length")
+    G.remove_node(super_id)
+    return dist, paths
 
 
 def main():
@@ -123,34 +129,49 @@ def main():
     bus_stops_all = json.loads(BUS_STOPS_JSON.read_text())["busStops"]
     bus_stops = [s for s in bus_stops_all if any(k in s["operator"] for k in MAJOR_OPERATOR_KEYWORDS)]
     stations = json.loads(TRAIN_STATIONS_JSON.read_text())["stations"]
-    print(f"  建物 {len(buildings)} 件 / バス停(主要事業者) {len(bus_stops)} 件 / 駅 {len(stations)} 件", file=sys.stderr)
+    print(
+        f"  建物 {len(buildings)} 件 / バス停(主要事業者) {len(bus_stops)} 件 / 駅 {len(stations)} 件",
+        file=sys.stderr,
+    )
 
     G = ox.load_graphml(ROAD_NETWORK_GRAPHML)
     G_undirected = G.to_undirected()
     print(f"  道路網: {len(G_undirected.nodes)} ノード / {len(G_undirected.edges)} エッジ", file=sys.stderr)
 
-    print("スナップ中...", file=sys.stderr)
-    building_xs = [b["lng"] for b in buildings]
-    building_ys = [b["lat"] for b in buildings]
-    building_nodes = ox.distance.nearest_nodes(G_undirected, building_xs, building_ys)
+    print("エッジスナップ用の投影グラフを構築中...", file=sys.stderr)
+    snapper = EdgeSnapper(G_undirected)
 
-    bus_xs = [s["lng"] for s in bus_stops]
-    bus_ys = [s["lat"] for s in bus_stops]
-    bus_nodes = ox.distance.nearest_nodes(G_undirected, bus_xs, bus_ys)
-
-    station_xs = [s["lng"] for s in stations]
-    station_ys = [s["lat"] for s in stations]
-    station_nodes = ox.distance.nearest_nodes(G_undirected, station_xs, station_ys)
+    print("建物・バス停・駅をエッジ上にスナップして仮想ノードを挿入中...", file=sys.stderr)
+    building_virtual = insert_virtual_nodes(
+        G_undirected, snapper, [(b["lat"], b["lng"]) for b in buildings], "bldg::"
+    )
+    bus_virtual = insert_virtual_nodes(
+        G_undirected, snapper, [(s["lat"], s["lng"]) for s in bus_stops], "bus::"
+    )
+    station_virtual = insert_virtual_nodes(
+        G_undirected, snapper, [(s["lat"], s["lng"]) for s in stations], "sta::"
+    )
+    print(
+        f"  道路網（仮想ノード挿入後）: {len(G_undirected.nodes)} ノード / {len(G_undirected.edges)} エッジ",
+        file=sys.stderr,
+    )
 
     print("バス停・駅それぞれのスーパーソースからダイクストラ実行中...", file=sys.stderr)
-    bus_snap = [(s["name"], n, s["lat"], s["lng"]) for s, n in zip(bus_stops, bus_nodes)]
-    station_snap = [(s["name"], n, s["lat"], s["lng"]) for s, n in zip(stations, station_nodes)]
+    bus_vids = [v[0] for v in bus_virtual]
+    bus_dist, bus_paths = run_supersource_dijkstra(G_undirected, bus_vids)
 
-    H_bus, super_bus, bus_node_best = build_supersource_routes(G_undirected, bus_snap)
-    bus_dist, bus_paths = nx.single_source_dijkstra(H_bus, super_bus, weight="length")
+    station_vids = [v[0] for v in station_virtual]
+    station_dist, station_paths = run_supersource_dijkstra(G_undirected, station_vids)
 
-    H_station, super_station, station_node_best = build_supersource_routes(G_undirected, station_snap)
-    station_dist, station_paths = nx.single_source_dijkstra(H_station, super_station, weight="length")
+    # virtual_id -> (name/info, snap_lat, snap_lng, perp_dist, actual_lat, actual_lng)
+    bus_info = {
+        vid: (bus_stops[i]["name"], snap_lat, snap_lng, perp, bus_stops[i]["lat"], bus_stops[i]["lng"])
+        for i, (vid, snap_lat, snap_lng, perp) in enumerate(bus_virtual)
+    }
+    station_info = {
+        vid: (stations[i]["name"], snap_lat, snap_lng, perp, stations[i]["lat"], stations[i]["lng"])
+        for i, (vid, snap_lat, snap_lng, perp) in enumerate(station_virtual)
+    }
 
     elevation = ElevationProvider()
     elev_cache: dict[tuple[float, float], float | None] = {}
@@ -161,29 +182,27 @@ def main():
             elev_cache[key] = elevation.get_elevation(lat, lng)
         return elev_cache[key]
 
-    def compute_side(building, building_node, dist_map, paths_map, node_best):
-        if building_node not in dist_map:
+    def compute_side(building, building_vid, building_perp, dist_map, paths_map, info_map):
+        if building_vid not in dist_map:
             return None
-        network_dist = dist_map[building_node]
-        path = paths_map[building_node][1:]  # スーパーソースを除く（先頭が停留所側スナップノード）
-        entry_node = path[0]
-        # node_bestは(name, lastMileM, lat, lng)を保持しているので、停留所の実座標を
-        # 名前での再検索なしに直接取得できる（同名停留所の取り違えバグの再発防止）。
-        name, entry_last_mile, stop_lat, stop_lng = node_best[entry_node]
+        network_dist = dist_map[building_vid]
+        path = paths_map[building_vid][1:]  # スーパーソースを除く（先頭が停留所側の仮想ノード）
+        entry_vid = path[0]
+        name, stop_snap_lat, stop_snap_lng, stop_perp, stop_lat, stop_lng = info_map[entry_vid]
 
-        node_coords = [(G_undirected.nodes[n]["y"], G_undirected.nodes[n]["x"]) for n in path]
-        stop_elev = get_elev(stop_lat, stop_lng)
-        building_elev = get_elev(building["lat"], building["lng"])
-        node_elevs = [get_elev(lat, lng) for lat, lng in node_coords]
-
-        # 実際の停留所座標 -> 経路上の各ノード -> 実際の建物座標、の順の頂点列。
+        # path[0]=停留所の仮想スナップノード, path[-1]=建物の仮想スナップノード。
+        # 実座標 -> 仮想スナップノード -> 経路上の実ノード群 -> 仮想スナップノード -> 実座標、の順。
+        node_coords = [
+            (G_undirected.nodes[n]["y"], G_undirected.nodes[n]["x"]) for n in path
+        ]
         coords = [(stop_lat, stop_lng)] + node_coords + [(building["lat"], building["lng"])]
-        elevs = [stop_elev] + node_elevs + [building_elev]
+        elevs = [get_elev(stop_lat, stop_lng)] + [get_elev(lat, lng) for lat, lng in node_coords] + [
+            get_elev(building["lat"], building["lng"])
+        ]
 
         return {
             "name": name,
-            "networkDistanceM": network_dist,
-            "straightLastMileM": entry_last_mile,
+            "totalDistanceM": network_dist + stop_perp + building_perp,
             "coords": coords,
             "elevs": elevs,
         }
@@ -192,10 +211,10 @@ def main():
     n = len(buildings)
     t_compute = time.time()
     for i, building in enumerate(buildings):
-        b_node = building_nodes[i]
+        b_vid, _, _, b_perp = building_virtual[i]
 
-        bus_side = compute_side(building, b_node, bus_dist, bus_paths, bus_node_best)
-        station_side = compute_side(building, b_node, station_dist, station_paths, station_node_best)
+        bus_side = compute_side(building, b_vid, b_perp, bus_dist, bus_paths, bus_info)
+        station_side = compute_side(building, b_vid, b_perp, station_dist, station_paths, station_info)
         if bus_side is None or station_side is None:
             continue
 
@@ -206,11 +225,9 @@ def main():
             "usage": building["usage"],
             "totalFloorArea": building["totalFloorArea"],
             "nearestStopName": bus_side["name"],
-            "busNetworkDistanceM": round(bus_side["networkDistanceM"] + bus_side["straightLastMileM"], 1),
+            "busNetworkDistanceM": round(bus_side["totalDistanceM"], 1),
             "nearestStationName": station_side["name"],
-            "stationNetworkDistanceM": round(
-                station_side["networkDistanceM"] + station_side["straightLastMileM"], 1
-            ),
+            "stationNetworkDistanceM": round(station_side["totalDistanceM"], 1),
         }
         for profile_key, profile in WALK_PROFILES.items():
             bus_eff = effective_distance(bus_side["coords"], bus_side["elevs"], profile["slopePenaltyFactor"])
