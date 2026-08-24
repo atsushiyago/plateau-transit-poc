@@ -121,6 +121,29 @@ const WALK_PROFILES: Record<WalkProfile, { label: string; slopePenaltyFactor: nu
 };
 const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 
+// 【feature/road-network-distanceブランチ限定・実験的】直線距離モデル（デフォルト、mainと同じ
+// ライブ計算）と、道路網距離モデル（scripts/road-network/で事前計算したbuilding-network-scores.json
+// を読み込むだけ）を、ブラウザ上で切り替えて見比べられるようにするためのトグル。
+// ユーザーから「別ブランチで動かしたら空白地の色付けがどれくらい変わるのか見たい」との要望を受けて、
+// mainとブランチを行き来せず同じ画面上で比較できるよう追加した（あくまで視覚比較用の一時的な
+// 実装であり、本採用するかどうかは別途判断する）。
+type DistanceModel = "straight" | "network";
+const DISTANCE_MODEL_DEFAULT: DistanceModel = "straight";
+const BUILDING_NETWORK_SCORES_JSON_URL = "/data/building-network-scores.json";
+type BuildingNetworkScoreRow = {
+  buildingId: string;
+  busNetworkDistanceM: number;
+  stationNetworkDistanceM: number;
+  busEffectiveDistanceM_general: number;
+  stationEffectiveDistanceM_general: number;
+  coverageRatio_general: number;
+  busEffectiveDistanceM_elderly: number;
+  stationEffectiveDistanceM_elderly: number;
+  coverageRatio_elderly: number;
+  nearestStopName: string;
+  nearestStationName: string;
+};
+
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
 // ORで比較するための正規化で、ratio<=1ならどちらか一方の基準を満たす＝「カバーされている」。
@@ -484,19 +507,25 @@ function Legend({
   clusterCount,
   showHelloCycling,
   walkProfile,
+  distanceModel,
+  loadingNetworkScores,
   onGapThresholdChange,
   onClusterCountChange,
   onShowHelloCyclingChange,
   onWalkProfileChange,
+  onDistanceModelChange,
 }: {
   gapThreshold: number;
   clusterCount: number;
   showHelloCycling: boolean;
   walkProfile: WalkProfile;
+  distanceModel: DistanceModel;
+  loadingNetworkScores: boolean;
   onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
   onShowHelloCyclingChange: (value: boolean) => void;
   onWalkProfileChange: (value: WalkProfile) => void;
+  onDistanceModelChange: (value: DistanceModel) => void;
 }) {
   return (
     <div
@@ -550,6 +579,31 @@ function Legend({
             <span>{WALK_PROFILES[key].label}</span>
           </label>
         ))}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <div style={{ opacity: 0.85, marginBottom: 2 }}>
+          距離モデル(実験的、feature/road-network-distanceのみ):
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="distanceModel"
+            checked={distanceModel === "straight"}
+            disabled={loadingNetworkScores}
+            onChange={() => onDistanceModelChange("straight")}
+          />
+          <span>直線距離(main相当)</span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="distanceModel"
+            checked={distanceModel === "network"}
+            disabled={loadingNetworkScores}
+            onChange={() => onDistanceModelChange("network")}
+          />
+          <span>道路網距離{loadingNetworkScores ? "（読み込み中…）" : ""}</span>
+        </label>
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", margin: "8px 0 6px" }} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
@@ -756,6 +810,11 @@ export default function PlateauViewer() {
   // 全建物ぶん無効化され、読み込み済みの建物すべてを新しいプロファイルで再計算する（詳細は
   // applyWalkProfileのコメント参照）。
   const [walkProfile, setWalkProfile] = useState<WalkProfile>(WALK_PROFILE_DEFAULT);
+  // 【実験的】直線距離モデル/道路網距離モデルの切り替え（詳細はDistanceModelのコメント参照）。
+  const [distanceModel, setDistanceModel] = useState<DistanceModel>(DISTANCE_MODEL_DEFAULT);
+  // "network"に初めて切り替えたときに44.5MBのJSONを遅延読み込みする。読み込み中はtrueにして
+  // Legendのラジオボタンを一時的に操作不能にし、多重フェッチを防ぐ。
+  const [loadingNetworkScores, setLoadingNetworkScores] = useState(false);
   // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
@@ -766,11 +825,13 @@ export default function PlateauViewer() {
   const demandTransitGapThresholdRef = useRef(demandTransitGapThreshold);
   const demandTransitClusterCountRef = useRef(demandTransitClusterCount);
   const walkProfileRef = useRef(walkProfile);
+  const distanceModelRef = useRef(distanceModel);
   useEffect(() => {
     demandTransitGapThresholdRef.current = demandTransitGapThreshold;
     demandTransitClusterCountRef.current = demandTransitClusterCount;
     walkProfileRef.current = walkProfile;
-  }, [demandTransitGapThreshold, demandTransitClusterCount, walkProfile]);
+    distanceModelRef.current = distanceModel;
+  }, [demandTransitGapThreshold, demandTransitClusterCount, walkProfile, distanceModel]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
@@ -780,6 +841,8 @@ export default function PlateauViewer() {
   // 呼ぶと、re-render前なのでuseEffectがまだ走っていない）。そのためinit()側の関数自身が
   // walkProfileRef.currentを直接書き換える。
   const applyWalkProfileRef = useRef<((profile: WalkProfile) => void) | null>(null);
+  // 【実験的】距離モデル切り替えのonChangeから呼べるようにするための橋渡し（applyWalkProfileRefと同じ理由）。
+  const applyDistanceModelRef = useRef<((model: DistanceModel) => void) | null>(null);
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -1025,6 +1088,11 @@ export default function PlateauViewer() {
       type CachedScore = { color: Cesium.Color; info: BuildingScoreInfo };
       const buildingScoreCache = new Map<string, CachedScore>();
       const featureScoreMap = new WeakMap<Cesium.Cesium3DTileFeature, BuildingScoreInfo>();
+      // 【実験的】道路網距離モデル用の事前計算データ（scripts/road-network/03_compute_scores.py
+      // の出力）。"network"に初めて切り替えたときにapplyDistanceModelが遅延フェッチしてここへ
+      // 格納する。buildingIdをキーに直接引けるので、該当する建物は地形サンプリング不要で
+      // 即座に色を決められる。
+      let networkScoreMap: Map<string, BuildingNetworkScoreRow> | null = null;
       // カバレッジ統計パネル（画面左下）用の累計カウンタ。buildingScoreCacheに新規登録される
       // たびに更新し、キャッシュヒット（再着色のみ）では増やさない。
       let scoredCoveredCount = 0;
@@ -1169,10 +1237,73 @@ export default function PlateauViewer() {
 
         if (candidates.length === 0) return;
 
+        const profile = WALK_PROFILES[walkProfileRef.current];
+
+        // buildingScoreCache/featureScoreMapへの登録・色付け・カウンタ更新を1箇所にまとめた
+        // ヘルパー。直線距離モデル（ライブ計算）・道路網距離モデル（事前計算データ）の
+        // どちらの経路からも同じ形で呼べるようにしている。
+        function recordScore(feature: Cesium.Cesium3DTileFeature, buildingId: string, info: BuildingScoreInfo) {
+          const color = colorForCoverageRatio(info.coverageRatio);
+          feature.color = color;
+          buildingScoreCache.set(buildingId, { color, info });
+          featureScoreMap.set(feature, info);
+          scoredTotalCount++;
+          if (info.isCovered) scoredCoveredCount++;
+        }
+
+        // 【実験的】道路網距離モデルが選択されていて事前計算データが読み込み済みなら、該当する
+        // 建物はそちらの数値をそのまま使う（地形サンプリング不要）。事前計算データに無い建物
+        // （オフライン抽出と実行タイミングがズレて生じた差分等）は直線距離モデルにフォールバックする。
+        let liveCandidates = candidates;
+        if (distanceModelRef.current === "network" && networkScoreMap) {
+          liveCandidates = [];
+          for (const c of candidates) {
+            const row = networkScoreMap.get(c.buildingId);
+            if (!row) {
+              liveCandidates.push(c);
+              continue;
+            }
+            const busEff =
+              walkProfileRef.current === "general" ? row.busEffectiveDistanceM_general : row.busEffectiveDistanceM_elderly;
+            const stationEff =
+              walkProfileRef.current === "general"
+                ? row.stationEffectiveDistanceM_general
+                : row.stationEffectiveDistanceM_elderly;
+            const coverageRatio =
+              walkProfileRef.current === "general" ? row.coverageRatio_general : row.coverageRatio_elderly;
+            const info: BuildingScoreInfo = {
+              usage: c.usage,
+              lat: c.lat,
+              lng: c.lng,
+              nearestStopName: row.nearestStopName,
+              // 道路網距離モデルには「直線距離」の概念が無いため、勾配加味前の道路網距離を代用する
+              // （現状のUIはこの値を表示していないため実用上の影響はない）。
+              busStraightDistanceMeters: row.busNetworkDistanceM,
+              busEffectiveDistanceMeters: busEff,
+              busWalkMinutes: busEff / profile.walkSpeedMPerMin,
+              nearestStationName: row.nearestStationName,
+              stationStraightDistanceMeters: row.stationNetworkDistanceM,
+              stationEffectiveDistanceMeters: stationEff,
+              stationWalkMinutes: stationEff / profile.walkSpeedMPerMin,
+              coverageRatio,
+              isCovered: coverageRatio <= 1,
+              totalFloorArea: c.totalFloorArea,
+              walkProfileLabel: `${profile.label}（道路網距離モデル・実験的）`,
+            };
+            recordScore(c.feature, c.buildingId, info);
+          }
+        }
+
+        if (liveCandidates.length === 0) {
+          setCoverageStats({ covered: scoredCoveredCount, total: scoredTotalCount });
+          scheduleDemandTransitRecompute();
+          return;
+        }
+
         // 各建物の最寄りバス停・最寄り駅を探す。バス停は主要事業者のみを対象にする
         // （理由は上のMAJOR_OPERATOR_KEYWORDSのコメント参照）。駅は5件のみなのでどちらも
         // 総当たりで十分速い。
-        const withNearest = candidates.map((c) => {
+        const withNearest = liveCandidates.map((c) => {
           let bestStop: BusStop | null = null;
           let bestStopDist = Infinity;
           for (const stop of majorOperatorStopList) {
@@ -1198,8 +1329,8 @@ export default function PlateauViewer() {
         // まとめる（既存の「タイル単位でバッチ化する」方針を維持。前半がバス、後半が駅の結果）。
         // 勾配感度（プロファイル）はこの時点のwalkProfileRef.currentを使う。プロファイル切替時は
         // applyWalkProfileがbuildingScoreCacheを空にしてから全読み込み済みタイルでprocessTileを
-        // 呼び直すため、ここで最新の値を読めば自動的に新プロファイルで再計算される。
-        const profile = WALK_PROFILES[walkProfileRef.current];
+        // 呼び直すため、ここで最新の値を読めば自動的に新プロファイルで再計算される（profileは
+        // このprocessTile関数の先頭で既に取得済み）。
         let results: EffectiveDistanceResult[];
         try {
           const busPairs = withNearest.map((c) => ({
@@ -1243,7 +1374,6 @@ export default function PlateauViewer() {
             stationEffectiveDistanceMeters / STATION_COVERAGE_THRESHOLD_METERS
           );
           const isCovered = coverageRatio <= 1;
-          const color = colorForCoverageRatio(coverageRatio);
           const info: BuildingScoreInfo = {
             usage: c.usage,
             lat: c.lat,
@@ -1261,11 +1391,7 @@ export default function PlateauViewer() {
             totalFloorArea: c.totalFloorArea,
             walkProfileLabel: profile.label,
           };
-          c.feature.color = color;
-          buildingScoreCache.set(c.buildingId, { color, info });
-          featureScoreMap.set(c.feature, info);
-          scoredTotalCount++;
-          if (isCovered) scoredCoveredCount++;
+          recordScore(c.feature, c.buildingId, info);
         });
         setCoverageStats({ covered: scoredCoveredCount, total: scoredTotalCount });
 
@@ -1299,6 +1425,43 @@ export default function PlateauViewer() {
         scheduleDemandTransitRecompute();
       }
       applyWalkProfileRef.current = applyWalkProfile;
+
+      // 【実験的】直線距離モデル/道路網距離モデルの切り替え。"network"に初めて切り替えたときだけ
+      // 44.5MBのbuilding-network-scores.jsonを遅延フェッチする（デフォルトの直線距離モデルしか
+      // 使わないユーザーに無駄な大容量ダウンロードをさせないため）。取得後はapplyWalkProfileと
+      // 同じ要領でscoreGenerationを進めてキャッシュを無効化し、tileVisible経由の自己修復に任せる。
+      async function applyDistanceModel(model: DistanceModel) {
+        distanceModelRef.current = model;
+        if (model === "network" && !networkScoreMap) {
+          setLoadingNetworkScores(true);
+          try {
+            const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
+            if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
+            const rows: BuildingNetworkScoreRow[] = await res.json();
+            if (cancelled) return;
+            networkScoreMap = new Map(rows.map((r) => [r.buildingId, r]));
+          } catch (err) {
+            console.warn(
+              "道路網距離モデルのデータ読み込みに失敗しました。直線距離モデルのままにします。",
+              err
+            );
+            distanceModelRef.current = "straight";
+            setDistanceModel("straight");
+            setLoadingNetworkScores(false);
+            return;
+          }
+          setLoadingNetworkScores(false);
+        }
+        scoreGeneration++;
+        buildingScoreCache.clear();
+        scoredCoveredCount = 0;
+        scoredTotalCount = 0;
+        setCoverageStats({ covered: 0, total: 0 });
+        scheduleDemandTransitRecompute();
+      }
+      applyDistanceModelRef.current = (model) => {
+        void applyDistanceModel(model);
+      };
 
       // Cesium標準のクリック選択（selectionIndicator/infoBox）は無効化しているため、
       // バス停・建物クリック時の情報表示は自前のInfoPopupで行う。
@@ -1446,6 +1609,7 @@ export default function PlateauViewer() {
       cancelled = true;
       scheduleDemandTransitRecomputeRef.current = null;
       applyWalkProfileRef.current = null;
+      applyDistanceModelRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -1460,6 +1624,8 @@ export default function PlateauViewer() {
         clusterCount={demandTransitClusterCount}
         showHelloCycling={showHelloCycling}
         walkProfile={walkProfile}
+        distanceModel={distanceModel}
+        loadingNetworkScores={loadingNetworkScores}
         onGapThresholdChange={(value) => {
           setDemandTransitGapThreshold(value);
           scheduleDemandTransitRecomputeRef.current?.();
@@ -1472,6 +1638,10 @@ export default function PlateauViewer() {
         onWalkProfileChange={(value) => {
           setWalkProfile(value);
           applyWalkProfileRef.current?.(value);
+        }}
+        onDistanceModelChange={(value) => {
+          setDistanceModel(value);
+          applyDistanceModelRef.current?.(value);
         }}
       />
       <UncoloredBuildingsNote />
