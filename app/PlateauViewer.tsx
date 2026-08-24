@@ -604,6 +604,18 @@ function Legend({
           />
           <span>道路網距離{loadingNetworkScores ? "（読み込み中…）" : ""}</span>
         </label>
+        <div
+          style={{
+            fontSize: 10.5,
+            opacity: 0.75,
+            marginTop: 4,
+            padding: "4px 6px",
+            background: "rgba(255,255,255,0.08)",
+            borderRadius: 4,
+          }}
+        >
+          このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、提出物本体（main）とは別のブランチ限定の実験的機能です。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
+        </div>
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", margin: "8px 0 6px" }} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
