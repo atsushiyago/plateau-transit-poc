@@ -144,6 +144,13 @@ type BuildingNetworkScoreRow = {
   nearestStationName: string;
 };
 
+// 【feature/road-network-distanceブランチ限定・実験的】道路網距離は直線距離より系統的に長くなる
+// ため、直線距離モデルと同じ300m/600mの閾値をそのまま道路網距離に適用すると判定が「厳しすぎる」
+// のでは、という丹野氏からの指摘（2026年8月）を受けて追加。道路網距離モデルの閾値にだけ
+// 調整可能な倍率をかけられるようにする（直線距離モデルは藤沢市公式定義との比較用の
+// ベースラインとして、常に固定の300m/600mのまま変更しない）。
+const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.0;
+
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
 // ORで比較するための正規化で、ratio<=1ならどちらか一方の基準を満たす＝「カバーされている」。
@@ -509,11 +516,13 @@ function Legend({
   walkProfile,
   distanceModel,
   loadingNetworkScores,
+  networkThresholdMultiplier,
   onGapThresholdChange,
   onClusterCountChange,
   onShowHelloCyclingChange,
   onWalkProfileChange,
   onDistanceModelChange,
+  onNetworkThresholdMultiplierChange,
 }: {
   gapThreshold: number;
   clusterCount: number;
@@ -521,11 +530,13 @@ function Legend({
   walkProfile: WalkProfile;
   distanceModel: DistanceModel;
   loadingNetworkScores: boolean;
+  networkThresholdMultiplier: number;
   onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
   onShowHelloCyclingChange: (value: boolean) => void;
   onWalkProfileChange: (value: WalkProfile) => void;
   onDistanceModelChange: (value: DistanceModel) => void;
+  onNetworkThresholdMultiplierChange: (value: number) => void;
 }) {
   return (
     <div
@@ -620,6 +631,24 @@ function Legend({
           }}
         >
           このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、提出物本体（main）とは別のブランチ限定の実験的機能です。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
+        </div>
+        <div style={{ marginTop: 6, opacity: distanceModel === "network" ? 1 : 0.5 }}>
+          <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <span>道路網距離モデルの判定基準の緩和倍率: {networkThresholdMultiplier.toFixed(1)}倍</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={3}
+            step={0.1}
+            value={networkThresholdMultiplier}
+            disabled={distanceModel !== "network"}
+            onChange={(e) => onNetworkThresholdMultiplierChange(Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
+            道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの公式基準にこの倍率をかけて判定を緩和できます（直線距離モデルは常に公式基準のまま固定）。
+          </div>
         </div>
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", margin: "8px 0 6px" }} />
@@ -832,6 +861,11 @@ export default function PlateauViewer() {
   // "network"に初めて切り替えたときに44.5MBのJSONを遅延読み込みする。読み込み中はtrueにして
   // Legendのラジオボタンを一時的に操作不能にし、多重フェッチを防ぐ。
   const [loadingNetworkScores, setLoadingNetworkScores] = useState(false);
+  // 【実験的】道路網距離モデルの閾値倍率（詳細はNETWORK_THRESHOLD_MULTIPLIER_DEFAULTのコメント参照）。
+  // 直線距離モデルの閾値(300m/600m)は常に固定で、このstateは"network"選択時のみ効く。
+  const [networkThresholdMultiplier, setNetworkThresholdMultiplier] = useState(
+    NETWORK_THRESHOLD_MULTIPLIER_DEFAULT
+  );
   // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
@@ -843,12 +877,20 @@ export default function PlateauViewer() {
   const demandTransitClusterCountRef = useRef(demandTransitClusterCount);
   const walkProfileRef = useRef(walkProfile);
   const distanceModelRef = useRef(distanceModel);
+  const networkThresholdMultiplierRef = useRef(networkThresholdMultiplier);
   useEffect(() => {
     demandTransitGapThresholdRef.current = demandTransitGapThreshold;
     demandTransitClusterCountRef.current = demandTransitClusterCount;
     walkProfileRef.current = walkProfile;
     distanceModelRef.current = distanceModel;
-  }, [demandTransitGapThreshold, demandTransitClusterCount, walkProfile, distanceModel]);
+    networkThresholdMultiplierRef.current = networkThresholdMultiplier;
+  }, [
+    demandTransitGapThreshold,
+    demandTransitClusterCount,
+    walkProfile,
+    distanceModel,
+    networkThresholdMultiplier,
+  ]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
@@ -860,6 +902,9 @@ export default function PlateauViewer() {
   const applyWalkProfileRef = useRef<((profile: WalkProfile) => void) | null>(null);
   // 【実験的】距離モデル切り替えのonChangeから呼べるようにするための橋渡し（applyWalkProfileRefと同じ理由）。
   const applyDistanceModelRef = useRef<((model: DistanceModel) => void) | null>(null);
+  // 【実験的】道路網距離モデルの閾値倍率スライダーのonChangeから呼べるようにするための橋渡し
+  // （applyWalkProfileRefと同じ理由。同期的にrefを書き換えてからキャッシュを無効化する）。
+  const applyNetworkThresholdMultiplierRef = useRef<((multiplier: number) => void) | null>(null);
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -1286,8 +1331,14 @@ export default function PlateauViewer() {
               walkProfileRef.current === "general"
                 ? row.stationEffectiveDistanceM_general
                 : row.stationEffectiveDistanceM_elderly;
-            const coverageRatio =
-              walkProfileRef.current === "general" ? row.coverageRatio_general : row.coverageRatio_elderly;
+            // 事前計算済みのrow.coverageRatio_*（固定300m/600m基準で焼き込み済み）はそのまま
+            // 使わず、閾値倍率スライダーの現在値を反映してその場で計算し直す（道路網距離は
+            // 系統的に長くなるため、倍率>1で判定を緩められるようにする。上のコメント参照）。
+            const multiplier = networkThresholdMultiplierRef.current;
+            const coverageRatio = Math.min(
+              busEff / (BUS_COVERAGE_THRESHOLD_METERS * multiplier),
+              stationEff / (STATION_COVERAGE_THRESHOLD_METERS * multiplier)
+            );
             const info: BuildingScoreInfo = {
               usage: c.usage,
               lat: c.lat,
@@ -1480,6 +1531,22 @@ export default function PlateauViewer() {
         void applyDistanceModel(model);
       };
 
+      // 【実験的】道路網距離モデルの閾値倍率が変わったときに呼ぶ。事前計算データの再取得は
+      // 不要（rowの生の実効距離はそのまま使い、coverageRatioだけその場で計算し直すため）。
+      // applyWalkProfileと同じ要領でscoreGenerationを進めてキャッシュを無効化し、tileVisible
+      // 経由の自己修復に任せる。直線距離モデル選択中に呼ばれても実害は無い（無効化されるだけで、
+      // 再計算時はprocessTileの直線距離ブランチが素通りする）。
+      function applyNetworkThresholdMultiplier(multiplier: number) {
+        networkThresholdMultiplierRef.current = multiplier;
+        scoreGeneration++;
+        buildingScoreCache.clear();
+        scoredCoveredCount = 0;
+        scoredTotalCount = 0;
+        setCoverageStats({ covered: 0, total: 0 });
+        scheduleDemandTransitRecompute();
+      }
+      applyNetworkThresholdMultiplierRef.current = applyNetworkThresholdMultiplier;
+
       // Cesium標準のクリック選択（selectionIndicator/infoBox）は無効化しているため、
       // バス停・建物クリック時の情報表示は自前のInfoPopupで行う。
       const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
@@ -1627,6 +1694,7 @@ export default function PlateauViewer() {
       scheduleDemandTransitRecomputeRef.current = null;
       applyWalkProfileRef.current = null;
       applyDistanceModelRef.current = null;
+      applyNetworkThresholdMultiplierRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -1643,6 +1711,7 @@ export default function PlateauViewer() {
         walkProfile={walkProfile}
         distanceModel={distanceModel}
         loadingNetworkScores={loadingNetworkScores}
+        networkThresholdMultiplier={networkThresholdMultiplier}
         onGapThresholdChange={(value) => {
           setDemandTransitGapThreshold(value);
           scheduleDemandTransitRecomputeRef.current?.();
@@ -1659,6 +1728,10 @@ export default function PlateauViewer() {
         onDistanceModelChange={(value) => {
           setDistanceModel(value);
           applyDistanceModelRef.current?.(value);
+        }}
+        onNetworkThresholdMultiplierChange={(value) => {
+          setNetworkThresholdMultiplier(value);
+          applyNetworkThresholdMultiplierRef.current?.(value);
         }}
       />
       <UncoloredBuildingsNote />
