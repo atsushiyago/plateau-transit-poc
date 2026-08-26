@@ -889,11 +889,13 @@ export default function PlateauViewer() {
   const [demandTransitClusterCount, setDemandTransitClusterCount] = useState(
     DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT
   );
-  // ハローサイクリングのステーションピンの表示/非表示トグル（デフォルトON）。既存のスライダーと
+  // ハローサイクリングのステーションピンの表示/非表示トグル（デフォルトOFF）。初期表示は
+  // 本題（交通空白地の色分け・デマンド交通候補地）に絞って見やすくするための既定値で、
+  // 必要な場合はユーザーがLegendのチェックボックスから自分でオンにできる。既存のスライダーと
   // 同じ「Legend内のUIでReact stateを変更し、init()内で作られたCesiumエンティティに反映する」
   // 方式を踏襲するが、こちらは再クラスタリングのような重い再計算が不要なため、
   // helloCyclingEntitiesRefに保持した各エンティティのentity.showを直接切り替えるだけで済む。
-  const [showHelloCycling, setShowHelloCycling] = useState(true);
+  const [showHelloCycling, setShowHelloCycling] = useState(false);
   // 勾配感度・歩行速度のプロファイル（「一般」/「高齢者」）。切り替えるとbuildingScoreCacheが
   // 全建物ぶん無効化され、読み込み済みの建物すべてを新しいプロファイルで再計算する（詳細は
   // applyWalkProfileのコメント参照）。
@@ -924,18 +926,24 @@ export default function PlateauViewer() {
   const walkProfileRef = useRef(walkProfile);
   const distanceModelRef = useRef(distanceModel);
   const networkThresholdMultiplierRef = useRef(networkThresholdMultiplier);
+  // ハローサイクリングのピンをinit()内で非同期生成する際、生成時点のトグル状態を
+  // 直接参照するためのref（他のトグルと同じ理由。init()のuseEffectは依存配列が空なので、
+  // stateを直接参照するとexhaustive-depsの警告が出るうえ値も更新されない）。
+  const showHelloCyclingRef = useRef(showHelloCycling);
   useEffect(() => {
     demandTransitGapThresholdRef.current = demandTransitGapThreshold;
     demandTransitClusterCountRef.current = demandTransitClusterCount;
     walkProfileRef.current = walkProfile;
     distanceModelRef.current = distanceModel;
     networkThresholdMultiplierRef.current = networkThresholdMultiplier;
+    showHelloCyclingRef.current = showHelloCycling;
   }, [
     demandTransitGapThreshold,
     demandTransitClusterCount,
     walkProfile,
     distanceModel,
     networkThresholdMultiplier,
+    showHelloCycling,
   ]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
@@ -1172,6 +1180,10 @@ export default function PlateauViewer() {
             name: station.name,
             position: Cesium.Cartesian3.fromDegrees(station.lng, station.lat),
             properties: { isHelloCyclingStation: true, capacity: station.capacity },
+            // 初期表示（既定OFF）とここでの生成が非同期に完了するタイミングがズレるため、
+            // Cesiumのentity.showの既定値（true）に任せず、現在のトグル状態を明示的に渡す。
+            // 切り替えのたびの反映は下のuseEffect（helloCyclingEntitiesRef経由）が担う。
+            show: showHelloCyclingRef.current,
             billboard: {
               image: bicycleIconUrl,
               width: 22,
