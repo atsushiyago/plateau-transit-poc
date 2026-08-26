@@ -517,12 +517,14 @@ function Legend({
   distanceModel,
   loadingNetworkScores,
   networkThresholdMultiplier,
+  showExperimentalDistanceModel,
   onGapThresholdChange,
   onClusterCountChange,
   onShowHelloCyclingChange,
   onWalkProfileChange,
   onDistanceModelChange,
   onNetworkThresholdMultiplierChange,
+  onToggleExperimentalDistanceModel,
 }: {
   gapThreshold: number;
   clusterCount: number;
@@ -531,12 +533,14 @@ function Legend({
   distanceModel: DistanceModel;
   loadingNetworkScores: boolean;
   networkThresholdMultiplier: number;
+  showExperimentalDistanceModel: boolean;
   onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
   onShowHelloCyclingChange: (value: boolean) => void;
   onWalkProfileChange: (value: WalkProfile) => void;
   onDistanceModelChange: (value: DistanceModel) => void;
   onNetworkThresholdMultiplierChange: (value: number) => void;
+  onToggleExperimentalDistanceModel: (value: boolean) => void;
 }) {
   return (
     <div
@@ -597,59 +601,82 @@ function Legend({
         ))}
       </div>
       <div style={{ marginTop: 4 }}>
-        <div style={{ opacity: 0.85, marginBottom: 2 }}>
-          距離モデル(実験的、feature/road-network-distanceのみ):
-        </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-          <input
-            type="radio"
-            name="distanceModel"
-            checked={distanceModel === "straight"}
-            disabled={loadingNetworkScores}
-            onChange={() => onDistanceModelChange("straight")}
-          />
-          <span>直線距離(main相当)</span>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-          <input
-            type="radio"
-            name="distanceModel"
-            checked={distanceModel === "network"}
-            disabled={loadingNetworkScores}
-            onChange={() => onDistanceModelChange("network")}
-          />
-          <span>道路網距離{loadingNetworkScores ? "（読み込み中…）" : ""}</span>
-        </label>
+        {/* 初見の審査員が「別の判定基準がある」と誤解しないよう、既定で折りたたんでおく
+            （detailsではなくdivクリックで開閉するのは、他のLegend要素とスタイルを揃えるため）。 */}
         <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onToggleExperimentalDistanceModel(!showExperimentalDistanceModel)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") onToggleExperimentalDistanceModel(!showExperimentalDistanceModel);
+          }}
           style={{
-            fontSize: 10.5,
-            opacity: 0.75,
-            marginTop: 4,
-            padding: "4px 6px",
-            background: "rgba(255,255,255,0.08)",
-            borderRadius: 4,
+            opacity: 0.85,
+            marginBottom: 2,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            userSelect: "none",
           }}
         >
-          このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、提出物本体（main）とは別のブランチ限定の実験的機能です。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
+          <span style={{ fontSize: 9 }}>{showExperimentalDistanceModel ? "▼" : "▶"}</span>
+          <span>距離モデル(実験的、feature/road-network-distanceのみ)</span>
         </div>
-        <div style={{ marginTop: 6, opacity: distanceModel === "network" ? 1 : 0.5 }}>
-          <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-            <span>道路網距離モデルの判定基準の緩和倍率: {networkThresholdMultiplier.toFixed(1)}倍</span>
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={3}
-            step={0.1}
-            value={networkThresholdMultiplier}
-            disabled={distanceModel !== "network"}
-            onChange={(e) => onNetworkThresholdMultiplierChange(Number(e.target.value))}
-            style={{ width: "100%" }}
-          />
-          <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-            道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの公式基準にこの倍率をかけて判定を緩和できます（直線距離モデルは常に公式基準のまま固定）。
-          </div>
-        </div>
+        {showExperimentalDistanceModel && (
+          <>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="distanceModel"
+                checked={distanceModel === "straight"}
+                disabled={loadingNetworkScores}
+                onChange={() => onDistanceModelChange("straight")}
+              />
+              <span>直線距離(main相当)</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="distanceModel"
+                checked={distanceModel === "network"}
+                disabled={loadingNetworkScores}
+                onChange={() => onDistanceModelChange("network")}
+              />
+              <span>道路網距離{loadingNetworkScores ? "（読み込み中…）" : ""}</span>
+            </label>
+            <div
+              style={{
+                fontSize: 10.5,
+                opacity: 0.75,
+                marginTop: 4,
+                padding: "4px 6px",
+                background: "rgba(255,255,255,0.08)",
+                borderRadius: 4,
+              }}
+            >
+              このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、提出物本体（main）とは別のブランチ限定の実験的機能です。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
+            </div>
+            <div style={{ marginTop: 6, opacity: distanceModel === "network" ? 1 : 0.5 }}>
+              <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <span>道路網距離モデルの判定基準の緩和倍率: {networkThresholdMultiplier.toFixed(1)}倍</span>
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={3}
+                step={0.1}
+                value={networkThresholdMultiplier}
+                disabled={distanceModel !== "network"}
+                onChange={(e) => onNetworkThresholdMultiplierChange(Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+              <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
+                道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの公式基準にこの倍率をかけて判定を緩和できます（直線距離モデルは常に公式基準のまま固定）。
+              </div>
+            </div>
+          </>
+        )}
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", margin: "8px 0 6px" }} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
@@ -866,6 +893,10 @@ export default function PlateauViewer() {
   const [networkThresholdMultiplier, setNetworkThresholdMultiplier] = useState(
     NETWORK_THRESHOLD_MULTIPLIER_DEFAULT
   );
+  // 【実験的】距離モデルのUIブロック（ラジオボタン・説明文・緩和倍率スライダー）の折りたたみ
+  // 開閉状態。初見の審査員が「別の判定基準がある」と誤解しないよう、既定で閉じておく
+  // （詳細な経緯はセクション見出しの説明文参照）。
+  const [showExperimentalDistanceModel, setShowExperimentalDistanceModel] = useState(false);
   // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
@@ -1712,6 +1743,7 @@ export default function PlateauViewer() {
         distanceModel={distanceModel}
         loadingNetworkScores={loadingNetworkScores}
         networkThresholdMultiplier={networkThresholdMultiplier}
+        showExperimentalDistanceModel={showExperimentalDistanceModel}
         onGapThresholdChange={(value) => {
           setDemandTransitGapThreshold(value);
           scheduleDemandTransitRecomputeRef.current?.();
@@ -1733,6 +1765,7 @@ export default function PlateauViewer() {
           setNetworkThresholdMultiplier(value);
           applyNetworkThresholdMultiplierRef.current?.(value);
         }}
+        onToggleExperimentalDistanceModel={setShowExperimentalDistanceModel}
       />
       <UncoloredBuildingsNote />
       <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
