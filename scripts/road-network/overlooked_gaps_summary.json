@@ -1,0 +1,8 @@
+{
+  "totalBuildingsCompared": 78542,
+  "skippedNoNetworkScore": 0,
+  "bothCovered": 39166,
+  "bothGap": 18302,
+  "overlookedCount_straightCoveredButNetworkGap": 21073,
+  "reverseFlipCount_straightGapButNetworkCovered": 1
+}

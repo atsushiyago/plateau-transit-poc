@@ -42,3 +42,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 道路ネットワーク距離のオフライン事前計算パイプライン（scripts/road-network/）用。
+# venv・中間キャッシュ（osmnxのOverpassレスポンスキャッシュ、ダウンロード済み.b3dm等）・
+# 中間生成物（各スクリプトの出力）は大きく・環境依存・再現可能なので、コミットするのは
+# スクリプト本体と最終成果物のJSON（public/data/配下）のみ。
+/scripts/road-network/venv/
+/scripts/road-network/cache/
+/scripts/road-network/*.pkl
+/scripts/road-network/*.graphml
+/scripts/road-network/buildings.json
+/scripts/road-network/buildings_sample.json
+/scripts/road-network/sample_scores.json
