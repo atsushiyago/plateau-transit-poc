@@ -542,6 +542,9 @@ function Legend({
   onNetworkThresholdMultiplierChange: (value: number) => void;
   onToggleExperimentalDistanceModel: (value: boolean) => void;
 }) {
+  // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
+  // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
+  const [experimentalHeaderHovered, setExperimentalHeaderHovered] = useState(false);
   return (
     <div
       style={{
@@ -602,7 +605,10 @@ function Legend({
       </div>
       <div style={{ marginTop: 4 }}>
         {/* 初見の審査員が「別の判定基準がある」と誤解しないよう、既定で折りたたんでおく
-            （detailsではなくdivクリックで開閉するのは、他のLegend要素とスタイルを揃えるため）。 */}
+            （detailsではなくdivクリックで開閉するのは、他のLegend要素とスタイルを揃えるため）。
+            クリックできることが伝わりにくいという指摘を受け、一般的なアコーディオンの見た目
+            （ホバーで背景が変わる・矢印を大きく目立つ色にする・「クリックで詳細」の一言を
+            添える）に寄せた。 */}
         <div
           role="button"
           tabIndex={0}
@@ -610,18 +616,27 @@ function Legend({
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") onToggleExperimentalDistanceModel(!showExperimentalDistanceModel);
           }}
+          onMouseEnter={() => setExperimentalHeaderHovered(true)}
+          onMouseLeave={() => setExperimentalHeaderHovered(false)}
           style={{
-            opacity: 0.85,
             marginBottom: 2,
+            marginLeft: -4,
+            marginRight: -4,
+            padding: "3px 4px",
+            borderRadius: 4,
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
-            gap: 4,
+            gap: 5,
             userSelect: "none",
+            background: experimentalHeaderHovered ? "rgba(255,255,255,0.14)" : "transparent",
+            transition: "background 0.1s ease",
           }}
         >
-          <span style={{ fontSize: 9 }}>{showExperimentalDistanceModel ? "▼" : "▶"}</span>
-          <span>距離モデル(実験的、feature/road-network-distanceのみ)</span>
+          <span style={{ fontSize: 13, color: "#6ecbf5", fontWeight: "bold", lineHeight: 1 }}>
+            {showExperimentalDistanceModel ? "▼" : "▶"}
+          </span>
+          <span style={{ opacity: 0.9 }}>距離モデル（実験的機能・クリックで詳細）</span>
         </div>
         {showExperimentalDistanceModel && (
           <>
@@ -633,7 +648,7 @@ function Legend({
                 disabled={loadingNetworkScores}
                 onChange={() => onDistanceModelChange("straight")}
               />
-              <span>直線距離(main相当)</span>
+              <span>直線距離（既定の判定基準）</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
               <input
@@ -655,7 +670,7 @@ function Legend({
                 borderRadius: 4,
               }}
             >
-              このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、提出物本体（main）とは別のブランチ限定の実験的機能です。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
+              このトグルは藤沢市への検証結果報告のために用意した比較検証機能で、既定の判定基準（直線距離）はこのまま変わりません。「道路網距離」に切り替えると、直線距離では基準を満たす扱いだった建物のうち実際にはどれだけが交通空白地に転じるか（見落としていたニーズ）を確認できます。
             </div>
             <div style={{ marginTop: 6, opacity: distanceModel === "network" ? 1 : 0.5 }}>
               <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
