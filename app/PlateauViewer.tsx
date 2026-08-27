@@ -154,13 +154,15 @@ const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.0;
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
 // ORで比較するための正規化で、ratio<=1ならどちらか一方の基準を満たす＝「カバーされている」。
-// ratio>1の超過分を、津波浸水深の色分け（plateau-poc の FLOOD_RANKS）と同じ考え方で
-// 赤系4段階のグラデーションに割り当てる（緑1色+赤系4段階のシンプルな2値+グラデーション）。
+// 【2026年8月・3段階に統合】当初はratio>1の超過分を赤系4段階（僅かに超過/やや遠い/遠い/
+// 非常に遠い）に分けていたが、実データで集計したところ「やや遠い」「遠い」に該当する建物は
+// 合わせて全体の6.3%しかなく（僅かに超過12.7%・非常に遠い0.2%に対して桁が違う）、実機で
+// 見ても2色（僅かに超過の薄いピンクと、非常に遠いの暗い赤）にほとんどのケースが収まって見え、
+// 中間2色にはめったに遭遇しないという指摘を受けた。中間2段階を「非常に遠い」側に統合し、
+// 緑1色＋赤系2段階（僅かに超過/非常に遠い）のシンプルな構成にした。
 const COVERAGE_RANKS: { maxRatio: number; legendLabel: string; color: Cesium.Color }[] = [
   { maxRatio: 1, legendLabel: "カバーされている", color: Cesium.Color.fromCssColorString("#22c55e") },
   { maxRatio: 1.5, legendLabel: "空白地（僅かに超過）", color: Cesium.Color.fromCssColorString("#fecaca") },
-  { maxRatio: 2, legendLabel: "空白地（やや遠い）", color: Cesium.Color.fromCssColorString("#f87171") },
-  { maxRatio: 3, legendLabel: "空白地（遠い）", color: Cesium.Color.fromCssColorString("#dc2626") },
   { maxRatio: Infinity, legendLabel: "空白地（非常に遠い）", color: Cesium.Color.fromCssColorString("#7f1d1d") },
 ];
 
@@ -1126,10 +1128,16 @@ export default function PlateauViewer() {
         console.warn("地名ラベルデータの読み込みに失敗しました。ラベル表示なしで継続します。", err);
       }
 
-      // 藤沢市が既に運行している乗合タクシー・オンデマンドバスの拠点を、青い円ピン＋半透明の
-      // 概算エリア（円）でオーバーレイ表示する。デマンド交通候補（紫の四角、このPoCの提案）と
-      // 見た目で明確に区別することで、「市の既存の取り組みを無視して候補を出しているのではない」
-      // ことを示す（詳細は上記EXISTING_DEMAND_TRANSIT_JSON_URLのコメント参照）。
+      // 藤沢市が既に運行している乗合タクシー・オンデマンドバスの拠点を、青い円ピンでオーバーレイ
+      // 表示する。デマンド交通候補（紫の四角、このPoCの提案）と見た目で明確に区別することで、
+      // 「市の既存の取り組みを無視して候補を出しているのではない」ことを示す（詳細は上記
+      // EXISTING_DEMAND_TRANSIT_JSON_URLのコメント参照）。
+      // 【対応済みの不具合】当初は概算の運行エリアを半透明の円（ellipse、GroundPrimitiveとして
+      // 地形に貼り付く）でも表示していたが、viewer.scene.pick()はクリック位置で最前面の
+      // オブジェクトを1つだけ返す仕様のため、この円の範囲内（半径数百m）にある建物をクリックしても
+      // 3D Tilesの建物フィーチャーではなく必ずこの円のエンティティが拾われてしまい、円の下にある
+      // 建物の情報を一切表示できなくなっていた。円は情報量としては副次的（ピンの位置だけで
+      // 拠点は伝わる）なので、円を削除しピンのみの表示に変更して解消した。
       try {
         const res = await fetch(EXISTING_DEMAND_TRANSIT_JSON_URL);
         const data: { services: ExistingDemandTransitService[] } = await res.json();
@@ -1142,15 +1150,6 @@ export default function PlateauViewer() {
             name: service.name,
             position: Cesium.Cartesian3.fromDegrees(service.lng, service.lat),
             properties: { isExistingDemandTransit: true, service },
-            // heightもheightReferenceも指定しないと、Cesiumはこのellipseを自動的に
-            // ClampToGroundのGroundPrimitiveとして地形に貼り付ける（Entity APIの標準的な挙動）。
-            // ただしこの描画方式は仕様上outline付き描画に対応していないため、outlineは付けない
-            // （付けても警告が出て無視されるだけ）。
-            ellipse: {
-              semiMinorAxis: service.radiusMeters,
-              semiMajorAxis: service.radiusMeters,
-              material: EXISTING_DEMAND_TRANSIT_COLOR.withAlpha(0.12),
-            },
             billboard: {
               image: existingDemandTransitIconUrl,
               width: 20,
@@ -1698,7 +1697,9 @@ export default function PlateauViewer() {
               `事業者: ${service.operator}`,
               `運行開始: ${service.startDate}`,
               service.description,
-              ...(service.areaConfidence === "low" ? ["（円の範囲は目安。正確な運行区域とは異なる）"] : []),
+              ...(service.areaConfidence === "low"
+                ? ["（表示位置は行き先地名からの機械的な目安。正確な運行区域とは異なる）"]
+                : []),
               <a key="src" href={service.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "#93c5fd" }}>
                 藤沢市公式ページ
               </a>,
