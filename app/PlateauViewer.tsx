@@ -781,6 +781,9 @@ function Legend({
           onChange={(e) => onGapThresholdChange(Number(e.target.value))}
           style={{ width: "100%" }}
         />
+        <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
+          1.0倍（既定）は公式基準を1件でも満たさない建物すべてが対象（候補地点は多め・網羅的）。上げるほど、より深刻な建物だけに絞り込む（候補地点は少なめ・優先度の高い場所に集中）。
+        </div>
       </div>
       <div style={{ marginTop: 4 }}>
         <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
