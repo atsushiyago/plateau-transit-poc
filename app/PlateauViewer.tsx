@@ -1158,8 +1158,10 @@ export default function PlateauViewer() {
               properties: { isExistingDemandTransit: true, service, stopName: stop.name },
               billboard: {
                 image: existingDemandTransitIconUrl,
-                width: 20,
-                height: 20,
+                // バス停ピン（point、pixelSize=BUS_STOP_PIXEL_SIZE=10）と大きさを揃える。
+                // 元々20x20だったため、他の丸ピンより一回り大きく見えるという指摘を受けて修正した。
+                width: BUS_STOP_PIXEL_SIZE,
+                height: BUS_STOP_PIXEL_SIZE,
                 verticalOrigin: Cesium.VerticalOrigin.CENTER,
                 heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
                 disableDepthTestDistance: Number.POSITIVE_INFINITY,
