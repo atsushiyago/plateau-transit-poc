@@ -293,20 +293,26 @@ const DEMAND_TRANSIT_COLOR = "#a855f7";
 const PLACE_LABELS_JSON_URL = "/data/place-labels.json";
 type PlaceLabel = { name: string; lat: number; lng: number };
 
-// 藤沢市が既に運行している乗合タクシー・オンデマンドバス（天神町AIオンデマンドバス、のりあい善行、
-// おでかけ六会）を、このPoCが提案する「デマンド交通乗り場候補」（紫の四角ピン）と区別できる形で
-// 地図上にオーバーレイ表示する。「このPoCは市の既存の取り組みと無関係に候補を出しているのではなく、
-// 市がまだ手を付けていない場所を見つけるための優先順位付けツールである」ことを示すための機能
-// （ユーザーからのフィードバックで追加、詳細はセッションのやり取り参照）。
-// 中心座標・半径は、各サービスの公式ページに正確な運行エリア境界（丁目リストや地図）が
-// 掲載されていなかったため、以下の方法で機械的に算出した近似値（`public/data/existing-demand-transit.json`
-// の`areaConfidence`で精度の目安を区別）:
-// - 天神町（areaConfidence: "high"）: public/data/bus-stops.json内の「天神町」始まりの停留所10件
-//   （天神町循環線の実際の停留所と一致すると考えられる）の重心・最大距離から算出
-// - のりあい善行・おでかけ六会（areaConfidence: "low"）: 公式ページに記載された行き先地名
-//   （亀井野・立石・善行駅、西俣野・六会日大前駅）をplace-labels.json/train-stations.jsonから
-//   引き、その平均座標・最大距離から算出した目安（実際の運行区域とは異なる可能性がある）
+// 藤沢市が既に運行している乗合タクシー・オンデマンドバス（天神町AIオンデマンドバス、のりあい善行）を、
+// このPoCが提案する「デマンド交通乗り場候補」（紫の四角ピン）と区別できる形で地図上にオーバーレイ
+// 表示する。「このPoCは市の既存の取り組みと無関係に候補を出しているのではなく、市がまだ手を
+// 付けていない場所を見つけるための優先順位付けツールである」ことを示すための機能。
+// 【2026年8月・実際の停留所群を使う方式に変更】当初は各サービスにつき1点（中心座標・半径から
+// 算出した概算エリア）のみを表示していたが、「実際にはいくつも停留所があるはずなのに1つしか
+// 表示されていないのでは」という指摘を受けて見直した。調べたところ、天神町AIオンデマンドバス
+// （既存の路線バス「天神町循環線」をAIオンデマンド化したもの）は`public/data/bus-stops.json`内の
+// 「天神町」始まりの停留所10件（神奈川中央交通）として、のりあい善行も同ファイル内の事業者名
+// 「善行地区郷土づくり推進会議」の17件として、**どちらも国土数値情報P11データにそのまま
+// 実在する**ことが分かった（のりあい善行の公式路線図PDFと突き合わせ、01系統8件・02系統11件
+// ＝重複除く17件の停留所名が完全一致することを確認済み）。そのため、概算の中心・半径を
+// 算出する必要が無くなり、`public/data/existing-demand-transit.json`の各サービスに実際の
+// 停留所一覧（`stops`）をそのまま持たせる方式に変更した。
+// 【同時に対応済み】「おでかけ六会」は2024年11月29日をもって収支悪化により運行終了（ユーザー
+// からの報告。藤沢市の地域公共交通ページ・のりあい善行ページのいずれにも記載が無くなっている
+// ことをWeb検索で確認したが、終了を明記した一次情報＝正式な告知文までは見つけられていない）。
+// 運行終了済みのサービスを現役のオーバーレイとして表示し続けるのは誤解を招くため、データから削除した。
 const EXISTING_DEMAND_TRANSIT_JSON_URL = "/data/existing-demand-transit.json";
+type ExistingDemandTransitStop = { name: string; lat: number; lng: number };
 type ExistingDemandTransitService = {
   name: string;
   type: string;
@@ -314,10 +320,7 @@ type ExistingDemandTransitService = {
   startDate: string;
   description: string;
   sourceUrl: string;
-  lat: number;
-  lng: number;
-  radiusMeters: number;
-  areaConfidence: "high" | "low";
+  stops: ExistingDemandTransitStop[];
 };
 const EXISTING_DEMAND_TRANSIT_COLOR = Cesium.Color.fromCssColorString("#3b82f6");
 
@@ -1146,19 +1149,23 @@ export default function PlateauViewer() {
           EXISTING_DEMAND_TRANSIT_COLOR.toCssColorString()
         );
         for (const service of data.services) {
-          viewer.entities.add({
-            name: service.name,
-            position: Cesium.Cartesian3.fromDegrees(service.lng, service.lat),
-            properties: { isExistingDemandTransit: true, service },
-            billboard: {
-              image: existingDemandTransitIconUrl,
-              width: 20,
-              height: 20,
-              verticalOrigin: Cesium.VerticalOrigin.CENTER,
-              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-              disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-          });
+          // サービス単位ではなく、実際の停留所（stops）単位でピンを1つずつ配置する
+          // （詳細は上記コメント参照。天神町10件・のりあい善行17件、いずれも実在の停留所）。
+          for (const stop of service.stops) {
+            viewer.entities.add({
+              name: `${service.name}（${stop.name}）`,
+              position: Cesium.Cartesian3.fromDegrees(stop.lng, stop.lat),
+              properties: { isExistingDemandTransit: true, service, stopName: stop.name },
+              billboard: {
+                image: existingDemandTransitIconUrl,
+                width: 20,
+                height: 20,
+                verticalOrigin: Cesium.VerticalOrigin.CENTER,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              },
+            });
+          }
         }
       } catch (err) {
         console.warn("既存デマンド交通データの読み込みに失敗しました。オーバーレイ表示なしで継続します。", err);
@@ -1690,16 +1697,14 @@ export default function PlateauViewer() {
           }
         } else if (entity instanceof Cesium.Entity && entity.properties?.isExistingDemandTransit?.getValue()) {
           const service: ExistingDemandTransitService = entity.properties.service.getValue();
+          const stopName: string = entity.properties.stopName.getValue();
           setPopup({
-            title: service.name,
+            title: `${service.name}（${stopName}）`,
             lines: [
               `種別: ${service.type}`,
               `事業者: ${service.operator}`,
               `運行開始: ${service.startDate}`,
               service.description,
-              ...(service.areaConfidence === "low"
-                ? ["（表示位置は行き先地名からの機械的な目安。正確な運行区域とは異なる）"]
-                : []),
               <a key="src" href={service.sourceUrl} target="_blank" rel="noreferrer" style={{ color: "#93c5fd" }}>
                 藤沢市公式ページ
               </a>,
