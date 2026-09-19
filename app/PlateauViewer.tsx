@@ -615,17 +615,19 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
     <div
       style={{
         position: "absolute",
-        right: 12,
-        top: 12,
-        zIndex: 10,
-        background: "rgba(20, 20, 20, 0.85)",
+        left: 12,
+        bottom: 12,
+        zIndex: 15,
+        background: "rgba(20, 20, 20, 0.9)",
         color: "#fff",
         padding: "10px 14px",
         borderRadius: 6,
         fontSize: 13,
         lineHeight: 1.6,
         fontFamily: "sans-serif",
-        maxWidth: 280,
+        maxWidth: 320,
+        boxShadow: "0 4px 16px rgba(0, 0, 0, 0.5)",
+        border: "1px solid rgba(255, 255, 255, 0.15)",
       }}
     >
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
@@ -718,6 +720,8 @@ function Legend({
         // 広がってしまう不具合が実際に発生した。他のパネル（InfoPopup/CoverageStatsPanel）と
         // 同様にmaxWidthで頭打ちにしておく。
         maxWidth: 320,
+        maxHeight: "calc(100vh - 250px)",
+        overflowY: "auto",
       }}
     >
       <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市公式の交通空白地判定基準</div>
@@ -1095,8 +1099,10 @@ function DemandTransitRecommendationPanel({
           width: "min(620px, calc(100vw - 24px))", minHeight: 300,
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           boxSizing: "border-box", background: "rgba(20, 20, 20, 0.92)", color: "#fff",
-          padding: 30, borderRadius: 6, fontFamily: "sans-serif", pointerEvents: "none",
+          padding: 30, borderRadius: 6, fontFamily: "sans-serif", pointerEvents: "auto",
         }}
+        onWheel={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
       >
         <button
           type="button"
@@ -1153,8 +1159,10 @@ function DemandTransitRecommendationPanel({
         fontSize: 16,
         lineHeight: 1.5,
         fontFamily: "sans-serif",
-        pointerEvents: "none",
+        pointerEvents: "auto",
       }}
+      onWheel={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <button
         type="button"
