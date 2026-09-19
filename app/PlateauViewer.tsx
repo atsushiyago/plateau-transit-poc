@@ -132,6 +132,10 @@ const DISTANCE_MODEL_DEFAULT: DistanceModel = "straight";
 const BUILDING_NETWORK_SCORES_JSON_URL = "/data/building-network-scores.json";
 type BuildingNetworkScoreRow = {
   buildingId: string;
+  lat: number;
+  lng: number;
+  usage: string;
+  totalFloorArea: number | null;
   busNetworkDistanceM: number;
   stationNetworkDistanceM: number;
   busEffectiveDistanceM_general: number;
@@ -219,6 +223,34 @@ type BuildingScoreInfo = {
   walkProfileLabel: string;
 };
 
+// 乗り場増設案の比較結果。候補地点を一つずつクリックしなくても、追加数ごとの
+// 改善度を確認できるようにする。
+type DemandTransitPlanResult = {
+  count: number;
+  averageBeforeMeters: number;
+  averageAfterMeters: number;
+  farthestTenPercentBeforeMeters: number;
+  farthestTenPercentAfterMeters: number;
+  newlyCoveredBuildings: number;
+  severeGapBeforeBuildings: number;
+  severeGapAfterBuildings: number;
+};
+type DemandTransitPlanAnalysis = {
+  targetBuildingCount: number;
+  scopeLabel: string;
+  thresholdMultiplier: number;
+  results: DemandTransitPlanResult[];
+};
+type DemandTransitMember = {
+  lat: number;
+  lng: number;
+  busStraightDistanceMeters: number;
+  busEffectiveDistanceMeters: number;
+  stationEffectiveDistanceMeters: number;
+  coverageRatio: number;
+};
+type DemandTransitPlanSite = { lat: number; lng: number; x: number; y: number };
+
 // 2点間の傾斜込み実効距離を計算する共通ロジック。住宅系建物の色分け（最寄りバス停まで）と、
 // デマンド交通乗り場候補の「もしここに乗り場を新設したら」の再計算の両方で使う
 // （後者は単に目的地を既存バス停群からクラスタ重心に差し替えて同じ関数を呼ぶだけでよい）。
@@ -264,18 +296,17 @@ async function computeEffectiveDistances(
   });
 }
 
-// デマンド交通乗り場候補: 藤沢市公式の交通空白地判定（COVERAGE_RANKS参照）でカバーされていない
-// （coverageRatioが一定倍率を超える）住宅系建物の座標にk-meansクラスタリングをかけ、クラスタ重心を
-// 「新しい乗り場を置くならここ」の候補地点として提案する。
-// 【方針決定】当初はバス実効距離のメートル閾値で判定していたが、藤沢市公式の交通空白地判定
-// （駅600m or バス300mのOR条件）に統一した。倍率のデフォルト1.0は「公式の空白地基準を1件でも
-// 満たさない＝空白地」に完全一致する。1.0より大きくすると「公式基準をさらに◯倍超過している、
-// より深刻なエリアだけに絞り込む」という優先順位付けツールとして機能する。
-// 対象倍率・候補数は、藤沢市の担当者が現場感覚に合わせてその場で調整できるよう
-// 左上のLegend内のスライダーで変更可能にしている（下記のuseState/refで管理。この2つの
-// 定数は初期値としてのみ使う）。
-const DEMAND_TRANSIT_GAP_RATIO_THRESHOLD_DEFAULT = 1.0;
+// デマンド交通乗り場候補は、藤沢市公式の交通空白地判定（COVERAGE_RANKS参照）でカバーされていない
+// 住宅系建物を対象にする。候補抽出の母集団は公式基準の1.0倍に固定する。以前は「深刻度」を
+// 絞り込むスライダーを設けていたが、比較分析の実効距離基準と意味が近く、操作軸が増えて
+// 分かりにくくなるため廃止した。
+const DEMAND_TRANSIT_GAP_RATIO_THRESHOLD = 1.0;
 const DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT = 4;
+// 比較分析では、実効距離に対してバス300m・駅600mをそのまま適用するか、坂道等による
+// 上乗せを見込んで何倍まで許容するかを別途選べるようにする。これは地図の公式判定を
+// 変えるものではなく、乗り場追加案の感度分析専用の条件である。
+// 徒歩経路の一般的な迂回率（約1.2）を、比較分析の初期条件に採用する。
+const DEMAND_TRANSIT_ANALYSIS_THRESHOLD_MULTIPLIER_DEFAULT = 1.2;
 // クラスタリング対象の建物数がこれ未満なら候補地点を出さない（サンプルが少なすぎて
 // 「クラスタ」と呼べる状態にならないため）。
 const DEMAND_TRANSIT_MIN_BUILDINGS = 8;
@@ -406,6 +437,114 @@ function kMeans(
   return centroids.map((centroid, c) => ({ centroid, indices: groups[c] })).filter((g) => g.indices.length > 0);
 }
 
+// 乗り場候補は、交通空白地の建物を400m格子にまとめた重心から選ぶ。各手順で「既存バス停と
+// すでに選んだ乗り場のうち最も近い距離」を更新し、総短縮量が最も大きい地点を一つだけ追加する。
+// これにより、k-meansのように候補数ごとに配置全体が入れ替わらず、1か所案→2か所案→…が
+// 必ず入れ子になる。実際の道路沿いの設置可否は別途確認が必要だが、追加数比較の目的関数を
+// 「建物の散らばり」ではなく「交通アクセスの改善」に揃えられる。
+const DEMAND_TRANSIT_CANDIDATE_GRID_METERS = 400;
+function buildGreedyDemandTransitPlan(
+  members: DemandTransitMember[],
+  maxSites: number,
+  thresholdMultiplier: number
+): { sites: DemandTransitPlanSite[]; results: DemandTransitPlanResult[] } {
+  const refLat = members.reduce((sum, building) => sum + building.lat, 0) / members.length;
+  const refLng = members.reduce((sum, building) => sum + building.lng, 0) / members.length;
+  const points = members.map((building) => projectToLocalMeters(building.lat, building.lng, refLat, refLng));
+  const slopeLoads = members.map((building) =>
+    Math.min(3, Math.max(1, building.busEffectiveDistanceMeters / Math.max(building.busStraightDistanceMeters, 1)))
+  );
+
+  const grid = new Map<string, { xSum: number; ySum: number; count: number }>();
+  points.forEach(([x, y]) => {
+    const key = `${Math.floor(x / DEMAND_TRANSIT_CANDIDATE_GRID_METERS)},${Math.floor(y / DEMAND_TRANSIT_CANDIDATE_GRID_METERS)}`;
+    const cell = grid.get(key) ?? { xSum: 0, ySum: 0, count: 0 };
+    cell.xSum += x;
+    cell.ySum += y;
+    cell.count++;
+    grid.set(key, cell);
+  });
+  const candidateSites: DemandTransitPlanSite[] = [...grid.values()].map((cell) => {
+    const x = cell.xSum / cell.count;
+    const y = cell.ySum / cell.count;
+    const [lat, lng] = unprojectFromLocalMeters(x, y, refLat, refLng);
+    return { lat, lng, x, y };
+  });
+
+  const currentDistances = members.map((building) => building.busEffectiveDistanceMeters);
+  const averageBeforeMeters = currentDistances.reduce((sum, distance) => sum + distance, 0) / members.length;
+  const farthestCount = Math.max(1, Math.ceil(members.length * 0.1));
+  const farthestIndices = new Set(
+    [...members.keys()]
+      .sort((a, b) => members[b].busEffectiveDistanceMeters - members[a].busEffectiveDistanceMeters)
+      .slice(0, farthestCount)
+  );
+  const farthestTenPercentBeforeMeters =
+    [...farthestIndices].reduce((sum, index) => sum + members[index].busEffectiveDistanceMeters, 0) / farthestCount;
+  const severeGapBeforeBuildings = members.filter((building) => building.coverageRatio > 1.5).length;
+  const selectedCandidateIndices = new Set<number>();
+  const sites: DemandTransitPlanSite[] = [];
+  const results: DemandTransitPlanResult[] = [];
+
+  for (let step = 0; step < Math.min(maxSites, candidateSites.length); step++) {
+    let bestCandidateIndex = -1;
+    let bestTotalImprovement = -Infinity;
+    for (let candidateIndex = 0; candidateIndex < candidateSites.length; candidateIndex++) {
+      if (selectedCandidateIndices.has(candidateIndex)) continue;
+      const candidate = candidateSites[candidateIndex];
+      let totalImprovement = 0;
+      for (let i = 0; i < members.length; i++) {
+        const dx = points[i][0] - candidate.x;
+        const dy = points[i][1] - candidate.y;
+        const candidateDistance = Math.sqrt(dx * dx + dy * dy) * slopeLoads[i];
+        if (candidateDistance < currentDistances[i]) totalImprovement += currentDistances[i] - candidateDistance;
+      }
+      if (totalImprovement > bestTotalImprovement) {
+        bestTotalImprovement = totalImprovement;
+        bestCandidateIndex = candidateIndex;
+      }
+    }
+    if (bestCandidateIndex < 0) break;
+
+    selectedCandidateIndices.add(bestCandidateIndex);
+    const selectedSite = candidateSites[bestCandidateIndex];
+    sites.push(selectedSite);
+    for (let i = 0; i < members.length; i++) {
+      const dx = points[i][0] - selectedSite.x;
+      const dy = points[i][1] - selectedSite.y;
+      const candidateDistance = Math.sqrt(dx * dx + dy * dy) * slopeLoads[i];
+      if (candidateDistance < currentDistances[i]) currentDistances[i] = candidateDistance;
+    }
+
+    let farthestAfterTotal = 0;
+    let newlyCoveredBuildings = 0;
+    let severeGapAfterBuildings = 0;
+    for (let i = 0; i < members.length; i++) {
+      const afterDistance = currentDistances[i];
+      if (farthestIndices.has(i)) farthestAfterTotal += afterDistance;
+      if (members[i].coverageRatio > 1 && afterDistance <= BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier) {
+        newlyCoveredBuildings++;
+      }
+      const coverageRatioAfter = Math.min(
+        afterDistance / (BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier),
+        members[i].stationEffectiveDistanceMeters / (STATION_COVERAGE_THRESHOLD_METERS * thresholdMultiplier)
+      );
+      if (coverageRatioAfter > 1.5) severeGapAfterBuildings++;
+    }
+    results.push({
+      count: sites.length,
+      averageBeforeMeters,
+      averageAfterMeters: currentDistances.reduce((sum, distance) => sum + distance, 0) / members.length,
+      farthestTenPercentBeforeMeters,
+      farthestTenPercentAfterMeters: farthestAfterTotal / farthestCount,
+      newlyCoveredBuildings,
+      severeGapBeforeBuildings,
+      severeGapAfterBuildings,
+    });
+  }
+  return { sites, results };
+}
+
 // デマンド交通乗り場候補ピンを、既存の丸ピン（バス停等）と見た目で区別するため、
 // canvasで紫の四角アイコンを生成してbillboard画像として使う。
 function createSquareIconDataUrl(fillColor: string, size = 28): string {
@@ -515,37 +654,45 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
 }
 
 function Legend({
-  gapThreshold,
   clusterCount,
+  analysisThresholdMultiplier,
   showHelloCycling,
   walkProfile,
   distanceModel,
   loadingNetworkScores,
   networkThresholdMultiplier,
   showExperimentalDistanceModel,
-  onGapThresholdChange,
   onClusterCountChange,
+  onAnalysisThresholdMultiplierChange,
   onShowHelloCyclingChange,
   onWalkProfileChange,
   onDistanceModelChange,
   onNetworkThresholdMultiplierChange,
   onToggleExperimentalDistanceModel,
+  isDemandTransitAnalysisRunning,
+  hasDemandTransitAnalysis,
+  isDemandTransitPanelVisible,
+  onShowDemandTransitPanel,
 }: {
-  gapThreshold: number;
   clusterCount: number;
+  analysisThresholdMultiplier: number;
   showHelloCycling: boolean;
   walkProfile: WalkProfile;
   distanceModel: DistanceModel;
   loadingNetworkScores: boolean;
   networkThresholdMultiplier: number;
   showExperimentalDistanceModel: boolean;
-  onGapThresholdChange: (value: number) => void;
   onClusterCountChange: (value: number) => void;
+  onAnalysisThresholdMultiplierChange: (value: number) => void;
   onShowHelloCyclingChange: (value: boolean) => void;
   onWalkProfileChange: (value: WalkProfile) => void;
   onDistanceModelChange: (value: DistanceModel) => void;
   onNetworkThresholdMultiplierChange: (value: number) => void;
   onToggleExperimentalDistanceModel: (value: boolean) => void;
+  isDemandTransitAnalysisRunning: boolean;
+  hasDemandTransitAnalysis: boolean;
+  isDemandTransitPanelVisible: boolean;
+  onShowDemandTransitPanel: () => void;
 }) {
   // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
   // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
@@ -770,23 +917,6 @@ function Legend({
       </div>
       <div style={{ marginTop: 6 }}>
         <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-          <span>対象とする空白の深刻度（公式基準の超過倍率）: {gapThreshold.toFixed(1)}倍〜</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={3}
-          step={0.1}
-          value={gapThreshold}
-          onChange={(e) => onGapThresholdChange(Number(e.target.value))}
-          style={{ width: "100%" }}
-        />
-        <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-          1.0倍（既定）は公式基準を1件でも満たさない建物すべてが対象（候補地点は多め・網羅的）。上げるほど、より深刻な建物だけに絞り込む（候補地点は少なめ・優先度の高い場所に集中）。
-        </div>
-      </div>
-      <div style={{ marginTop: 4 }}>
-        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
           <span>乗り場候補の数: {clusterCount}箇所</span>
         </label>
         <input
@@ -799,6 +929,39 @@ function Legend({
           style={{ width: "100%" }}
         />
       </div>
+      <div style={{ marginTop: 8, paddingTop: 7, borderTop: "1px solid rgba(255,255,255,0.25)" }}>
+        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <span>比較分析の実効距離基準: {analysisThresholdMultiplier.toFixed(1)}倍</span>
+        </label>
+        <input
+          type="range"
+          min={1}
+          max={1.5}
+          step={0.1}
+          value={analysisThresholdMultiplier}
+          onChange={(e) => onAnalysisThresholdMultiplierChange(Number(e.target.value))}
+          style={{ width: "100%" }}
+        />
+        <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
+          比較グラフだけに適用します。バス{Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m・駅{Math.round(STATION_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m相当で、実効距離を評価します。地図の公式判定は変わりません。
+        </div>
+      </div>
+      <div style={{ marginTop: 7, color: isDemandTransitAnalysisRunning ? "#d8b4fe" : "rgba(255,255,255,0.7)", fontSize: 11 }}>
+        {isDemandTransitAnalysisRunning ? "比較条件を反映中…" : "この比較用の倍率を変えると、グラフは自動で更新されます。"}
+      </div>
+      {hasDemandTransitAnalysis && !isDemandTransitPanelVisible && (
+        <button
+          type="button"
+          onClick={onShowDemandTransitPanel}
+          style={{
+            width: "100%", marginTop: 6, padding: "5px 8px", border: "1px solid rgba(216,180,254,0.8)",
+            borderRadius: 4, background: "rgba(126,34,206,0.42)", color: "#fff", fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          比較グラフを表示
+        </button>
+      )}
       <div style={{ marginTop: 6 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
           <input
@@ -887,15 +1050,241 @@ function CoverageStatsPanel({ covered, total }: { covered: number; total: number
   );
 }
 
+// 追加数を増やしたときの改善の伸びを、数値と小さな棒グラフで同時に見せる。
+// 「最適数」は費用・用地・運行体制で変わるため断定せず、現在スライダーで選んだ案を
+// 地図上の紫ピンと対応させて比較する。
+function DemandTransitRecommendationPanel({
+  analysis,
+  selectedCount,
+  isRunning,
+  pendingThresholdMultiplier,
+  isVisible,
+  onClose,
+}: {
+  analysis: DemandTransitPlanAnalysis | null;
+  selectedCount: number;
+  isRunning: boolean;
+  pendingThresholdMultiplier: number;
+  isVisible: boolean;
+  onClose: () => void;
+}) {
+  if (!isVisible) return null;
+  if (!analysis && !isRunning) return null;
+  if (!analysis) {
+    const busThreshold = Math.round(BUS_COVERAGE_THRESHOLD_METERS * pendingThresholdMultiplier);
+    const stationThreshold = Math.round(STATION_COVERAGE_THRESHOLD_METERS * pendingThresholdMultiplier);
+    return (
+      <div
+        style={{
+          position: "absolute", right: 12, bottom: 82, zIndex: 10,
+          width: "min(620px, calc(100vw - 24px))", minHeight: 300,
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          boxSizing: "border-box", background: "rgba(20, 20, 20, 0.92)", color: "#fff",
+          padding: 30, borderRadius: 6, fontFamily: "sans-serif", pointerEvents: "none",
+        }}
+      >
+        <button
+          type="button"
+          aria-label="アクセス改善比較を閉じる"
+          onClick={onClose}
+          style={{
+            position: "absolute", top: 12, right: 14, border: 0, background: "transparent", color: "#fff",
+            fontSize: 28, lineHeight: 1, cursor: "pointer", pointerEvents: "auto",
+          }}
+        >
+          ×
+        </button>
+        <style>{"@keyframes demand-transit-analysis-spin { to { transform: rotate(360deg); } }"}</style>
+        <div style={{ width: 64, height: 64, border: "7px solid rgba(216,180,254,0.25)", borderTopColor: "#d8b4fe", borderRadius: "50%", animation: "demand-transit-analysis-spin 0.9s linear infinite" }} />
+        <div style={{ marginTop: 22, color: "#d8b4fe", fontSize: 22, fontWeight: "bold" }}>アクセス改善案を比較中…</div>
+        <div style={{ marginTop: 8, fontSize: 15, color: "#e5e7eb" }}>実効距離・基準{pendingThresholdMultiplier.toFixed(1)}倍（バス{busThreshold}m／駅{stationThreshold}m相当）</div>
+      </div>
+    );
+  }
+  const selected = analysis.results.find((result) => result.count === selectedCount);
+  if (!selected) return null;
+  const maxReduction = Math.max(
+    ...analysis.results.map((result) => result.averageBeforeMeters - result.averageAfterMeters),
+    1
+  );
+  const maxFarthestReduction = Math.max(
+    ...analysis.results.map(
+      (result) => result.farthestTenPercentBeforeMeters - result.farthestTenPercentAfterMeters
+    ),
+    1
+  );
+  const reduction = selected.averageBeforeMeters - selected.averageAfterMeters;
+  const comparisonBusThreshold = Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysis.thresholdMultiplier);
+  const comparisonStationThreshold = Math.round(STATION_COVERAGE_THRESHOLD_METERS * analysis.thresholdMultiplier);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        right: 12,
+        bottom: 82,
+        zIndex: 10,
+        // 成果を説明する主パネルなので、従来の幅310pxから約2.5倍に広げる。小さい
+        // 画面では画面内に収め、縦方向も必要に応じてパネル内でスクロールさせる。
+        width: "min(620px, calc(100vw - 24px))",
+        minHeight: "min(700px, calc(100vh - 94px))",
+        maxHeight: "calc(100vh - 94px)",
+        overflowY: "auto",
+        boxSizing: "border-box",
+        background: "rgba(20, 20, 20, 0.88)",
+        color: "#fff",
+        padding: "24px 30px",
+        borderRadius: 6,
+        fontSize: 16,
+        lineHeight: 1.5,
+        fontFamily: "sans-serif",
+        pointerEvents: "none",
+      }}
+      >
+      <button
+        type="button"
+        aria-label="アクセス改善比較を閉じる"
+        onClick={onClose}
+        style={{
+          position: "absolute", top: 12, right: 14, zIndex: 2, border: 0, background: "transparent", color: "#fff",
+          fontSize: 28, lineHeight: 1, cursor: "pointer", pointerEvents: "auto",
+        }}
+      >
+        ×
+      </button>
+      <div style={{ color: "#d8b4fe", fontSize: 17, fontWeight: "bold" }}>追加乗り場数ごとのアクセス改善比較</div>
+      <div
+        style={{
+          marginTop: 12,
+          padding: "12px 14px",
+          border: "1px solid rgba(216,180,254,0.75)",
+          borderRadius: 6,
+          background: "rgba(126,34,206,0.18)",
+        }}
+      >
+        <div style={{ color: "#d8b4fe", fontSize: 14, fontWeight: "bold" }}>現在選択中の案</div>
+        <div style={{ marginTop: 2, fontSize: 24, fontWeight: "bold" }}>{selected.count}か所を追加した場合</div>
+        <div style={{ marginTop: 4, color: "#ddd", fontSize: 13 }}>
+          比較条件：実効距離・基準{analysis.thresholdMultiplier.toFixed(1)}倍（バス{comparisonBusThreshold}m／駅{comparisonStationThreshold}m相当）
+        </div>
+        <div style={{ marginTop: 3 }}>
+          対象建物の平均実効距離: 約{Math.round(selected.averageBeforeMeters)}m → 約
+          {Math.round(selected.averageAfterMeters)}m
+          <span style={{ color: "#86efac", fontWeight: "bold" }}>（約{Math.round(reduction)}m短縮）</span>
+        </div>
+        <div>新たに比較基準内のバス圏に入る住宅: {selected.newlyCoveredBuildings.toLocaleString()}棟</div>
+        <div style={{ marginTop: 5 }}>
+          遠い上位10%の平均実効距離: 約{Math.round(selected.farthestTenPercentBeforeMeters)}m → 約
+          {Math.round(selected.farthestTenPercentAfterMeters)}m
+          <span style={{ color: "#fcd34d", fontWeight: "bold" }}>
+            （約{Math.round(selected.farthestTenPercentBeforeMeters - selected.farthestTenPercentAfterMeters)}m短縮）
+          </span>
+        </div>
+        <div>
+          比較基準を1.5倍超過する住宅: {selected.severeGapBeforeBuildings.toLocaleString()}棟 → {selected.severeGapAfterBuildings.toLocaleString()}棟
+        </div>
+      </div>
+      <div style={{ marginTop: 16, borderTop: "2px solid rgba(255,255,255,0.4)", paddingTop: 12 }}>
+        <div style={{ color: "#fff", fontSize: 20, fontWeight: "bold" }}>全案の比較（1〜10か所）</div>
+        <div style={{ marginTop: 2, marginBottom: 10, fontSize: 13, opacity: 0.8 }}>
+          現在選択中の案だけでなく、追加数ごとの短縮幅を並べています。棒が長いほど改善が大きいことを示します。
+        </div>
+        {analysis.results.map((result) => {
+          const resultReduction = result.averageBeforeMeters - result.averageAfterMeters;
+          const farthestReduction = result.farthestTenPercentBeforeMeters - result.farthestTenPercentAfterMeters;
+          const isSelected = result.count === selectedCount;
+          return (
+            <div
+              key={result.count}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 9,
+                minHeight: 48,
+                marginBottom: 5,
+                padding: isSelected ? "3px 5px" : 0,
+                borderRadius: 4,
+                background: isSelected ? "rgba(192,132,252,0.16)" : "transparent",
+              }}
+            >
+              <span
+                style={{
+                  width: 66,
+                  flexShrink: 0,
+                  whiteSpace: "nowrap",
+                  color: isSelected ? "#d8b4fe" : "#ddd",
+                  fontWeight: isSelected ? "bold" : "normal",
+                }}
+              >
+                {result.count}か所
+              </span>
+              <div style={{ display: "grid", gap: 3 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13 }}>
+                  <span style={{ width: 50 }}>平均</span>
+                  <span style={{ width: 240, height: 12, background: "rgba(255,255,255,0.15)", borderRadius: 6, overflow: "hidden" }}>
+                    <span
+                      style={{
+                        display: "block",
+                        width: `${Math.max(2, (resultReduction / maxReduction) * 100)}%`,
+                        height: "100%",
+                        background: isSelected ? "#c084fc" : "#60a5fa",
+                      }}
+                    />
+                  </span>
+                  <span>−{Math.round(resultReduction)}m</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "#fcd34d" }}>
+                  <span style={{ width: 50 }}>遠い10%</span>
+                  <span style={{ width: 240, height: 12, background: "rgba(255,255,255,0.15)", borderRadius: 6, overflow: "hidden" }}>
+                    <span
+                      style={{
+                        display: "block",
+                        width: `${Math.max(2, (farthestReduction / maxFarthestReduction) * 100)}%`,
+                        height: "100%",
+                        background: isSelected ? "#fbbf24" : "#f59e0b",
+                      }}
+                    />
+                  </span>
+                  <span>−{Math.round(farthestReduction)}m</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 12, color: "#cbd5e1", fontSize: 13 }}>
+        各行は、前の案で選んだ地点を残したまま、交通アクセスの短縮量が最も大きくなる地点を一つずつ追加した案です。
+      </div>
+      <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
+        {analysis.scopeLabel}の比較対象 {analysis.targetBuildingCount.toLocaleString()}棟を比較。遠い10%は追加前に最も遠かった建物群を固定して比較しています。候補地点への直線距離に、既存経路の傾斜負荷を反映した概算です。用地・運行費用は含みません。
+      </div>
+      {isRunning && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 1, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", borderRadius: 6,
+            background: "rgba(11, 16, 19, 0.86)", color: "#fff",
+          }}
+        >
+          <style>{"@keyframes demand-transit-analysis-spin { to { transform: rotate(360deg); } }"}</style>
+          <div style={{ width: 68, height: 68, border: "8px solid rgba(216,180,254,0.28)", borderTopColor: "#d8b4fe", borderRadius: "50%", animation: "demand-transit-analysis-spin 0.9s linear infinite" }} />
+          <div style={{ marginTop: 22, color: "#d8b4fe", fontSize: 22, fontWeight: "bold" }}>条件を反映して比較中…</div>
+          <div style={{ marginTop: 8, fontSize: 15, color: "#e5e7eb" }}>実効距離・基準{pendingThresholdMultiplier.toFixed(1)}倍で再計算しています</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PlateauViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const [popup, setPopup] = useState<PopupInfo | null>(null);
-  const [demandTransitGapThreshold, setDemandTransitGapThreshold] = useState(
-    DEMAND_TRANSIT_GAP_RATIO_THRESHOLD_DEFAULT
-  );
   const [demandTransitClusterCount, setDemandTransitClusterCount] = useState(
     DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT
+  );
+  const [demandTransitAnalysisThresholdMultiplier, setDemandTransitAnalysisThresholdMultiplier] = useState(
+    DEMAND_TRANSIT_ANALYSIS_THRESHOLD_MULTIPLIER_DEFAULT
   );
   // ハローサイクリングのステーションピンの表示/非表示トグル（デフォルトOFF）。初期表示は
   // 本題（交通空白地の色分け・デマンド交通候補地）に絞って見やすくするための既定値で、
@@ -926,11 +1315,17 @@ export default function PlateauViewer() {
   // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
   // 表示用にこのstateだけ都度setする軽量なミラー）。
   const [coverageStats, setCoverageStats] = useState({ covered: 0, total: 0 });
+  // 「追加数と改善効果を比較」ボタンの結果。計算時点で読み込み済みの建物を対象にするため、
+  // カメラ移動で後から建物が増えても、表示済みの比較結果はその時点のスナップショットとして残す。
+  const [demandTransitPlanAnalysis, setDemandTransitPlanAnalysis] = useState<DemandTransitPlanAnalysis | null>(null);
+  const [isDemandTransitAnalysisRunning, setIsDemandTransitAnalysisRunning] = useState(false);
+  // 初見では地図の把握を優先し、比較結果は左上のボタンから任意で開く。
+  const [isDemandTransitPanelVisible, setIsDemandTransitPanelVisible] = useState(false);
   // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
   // 再レンダリングでは作り直されないため、スライダーの最新値をそのクロージャから読めるように
   // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
-  const demandTransitGapThresholdRef = useRef(demandTransitGapThreshold);
   const demandTransitClusterCountRef = useRef(demandTransitClusterCount);
+  const demandTransitAnalysisThresholdMultiplierRef = useRef(demandTransitAnalysisThresholdMultiplier);
   const walkProfileRef = useRef(walkProfile);
   const distanceModelRef = useRef(distanceModel);
   const networkThresholdMultiplierRef = useRef(networkThresholdMultiplier);
@@ -939,15 +1334,15 @@ export default function PlateauViewer() {
   // stateを直接参照するとexhaustive-depsの警告が出るうえ値も更新されない）。
   const showHelloCyclingRef = useRef(showHelloCycling);
   useEffect(() => {
-    demandTransitGapThresholdRef.current = demandTransitGapThreshold;
     demandTransitClusterCountRef.current = demandTransitClusterCount;
+    demandTransitAnalysisThresholdMultiplierRef.current = demandTransitAnalysisThresholdMultiplier;
     walkProfileRef.current = walkProfile;
     distanceModelRef.current = distanceModel;
     networkThresholdMultiplierRef.current = networkThresholdMultiplier;
     showHelloCyclingRef.current = showHelloCycling;
   }, [
-    demandTransitGapThreshold,
     demandTransitClusterCount,
+    demandTransitAnalysisThresholdMultiplier,
     walkProfile,
     distanceModel,
     networkThresholdMultiplier,
@@ -956,6 +1351,8 @@ export default function PlateauViewer() {
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
+  const scheduleDemandTransitAnalysisRef = useRef<((delayMs?: number) => void) | null>(null);
+  const clearDemandTransitAnalysisRef = useRef<(() => void) | null>(null);
   // プロファイル切り替えのonChangeから呼べるようにするための橋渡し。walkProfileRef.currentを
   // 同期的に更新してからbuildingScoreCacheを無効化・再計算するため、上のuseEffect経由の
   // 非同期な同期だと間に合わない（イベントハンドラ内でsetWalkProfileした直後にこの関数を
@@ -1249,7 +1646,6 @@ export default function PlateauViewer() {
       // busEffectiveDistanceMetersを表示用に保持している（対象建物のほとんどはバス距離が
       // カバー率のボトルネックになるため、代表的な指標として引き続きバス実効距離を見せる。
       // 抽出基準そのものはcoverageRatioの閾値なので、駅が近くバスが遠い建物も理論上は含まれ得る）。
-      type DemandTransitMember = { lat: number; lng: number; busEffectiveDistanceMeters: number };
       type DemandTransitCandidate = {
         entity: Cesium.Entity;
         centroidLat: number;
@@ -1257,6 +1653,10 @@ export default function PlateauViewer() {
         members: DemandTransitMember[];
       };
       let demandTransitCandidates: DemandTransitCandidate[] = [];
+      // 比較ボタンを押した後は、表示範囲に依存するbuildingScoreCacheではなく藤沢市北部全域の
+      // 建物をここに保持し、グラフの各案と同じ母集団から紫の候補ピンを描く。
+      let demandTransitAnalysisMembers: DemandTransitMember[] | null = null;
+      let demandTransitAnalysisSites: DemandTransitPlanSite[] | null = null;
       let demandTransitRecomputeTimer: ReturnType<typeof setTimeout> | null = null;
       // クリックのたびにインクリメントし、非同期の「新設した場合の推定実効距離」計算が
       // 完了した時点で最新のクリックと一致するかを確認する（古いリクエストの結果で
@@ -1266,10 +1666,21 @@ export default function PlateauViewer() {
 
       function recomputeDemandTransitCandidates() {
         if (cancelled) return;
-        const gapBuildings: DemandTransitMember[] = [];
-        for (const { info } of buildingScoreCache.values()) {
-          if (info.coverageRatio > demandTransitGapThresholdRef.current) {
-            gapBuildings.push({ lat: info.lat, lng: info.lng, busEffectiveDistanceMeters: info.busEffectiveDistanceMeters });
+        const gapBuildings: DemandTransitMember[] = demandTransitAnalysisMembers
+          ? demandTransitAnalysisMembers
+          : [];
+        if (!demandTransitAnalysisMembers) {
+          for (const { info } of buildingScoreCache.values()) {
+            if (info.coverageRatio > DEMAND_TRANSIT_GAP_RATIO_THRESHOLD) {
+              gapBuildings.push({
+                lat: info.lat,
+                lng: info.lng,
+                busStraightDistanceMeters: info.busStraightDistanceMeters,
+                busEffectiveDistanceMeters: info.busEffectiveDistanceMeters,
+                stationEffectiveDistanceMeters: info.stationEffectiveDistanceMeters,
+                coverageRatio: info.coverageRatio,
+              });
+            }
           }
         }
 
@@ -1284,7 +1695,31 @@ export default function PlateauViewer() {
         const refLat = gapBuildings.reduce((sum, b) => sum + b.lat, 0) / gapBuildings.length;
         const refLng = gapBuildings.reduce((sum, b) => sum + b.lng, 0) / gapBuildings.length;
         const projected = gapBuildings.map((b) => projectToLocalMeters(b.lat, b.lng, refLat, refLng));
-        const clusters = kMeans(projected, demandTransitClusterCountRef.current);
+        let clusters: { centroid: [number, number]; indices: number[] }[];
+        if (demandTransitAnalysisSites) {
+          // 全域比較で選んだ地点をそのまま使い、各建物を最も近い選択済み地点へ割り当てる。
+          // これにより、地図の紫ピンとグラフの同じ行が完全に対応する。
+          const selectedSites = demandTransitAnalysisSites.slice(0, demandTransitClusterCountRef.current);
+          const sitePoints = selectedSites.map((site) => projectToLocalMeters(site.lat, site.lng, refLat, refLng));
+          const indices = sitePoints.map(() => [] as number[]);
+          projected.forEach((point, buildingIndex) => {
+            let closestSite = 0;
+            let closestDistance = Infinity;
+            sitePoints.forEach((sitePoint, siteIndex) => {
+              const dx = point[0] - sitePoint[0];
+              const dy = point[1] - sitePoint[1];
+              const distance = dx * dx + dy * dy;
+              if (distance < closestDistance) {
+                closestDistance = distance;
+                closestSite = siteIndex;
+              }
+            });
+            if (sitePoints.length > 0) indices[closestSite].push(buildingIndex);
+          });
+          clusters = sitePoints.map((centroid, index) => ({ centroid, indices: indices[index] }));
+        } else {
+          clusters = kMeans(projected, demandTransitClusterCountRef.current);
+        }
 
         for (const cluster of clusters) {
           const [centroidLat, centroidLng] = unprojectFromLocalMeters(
@@ -1324,6 +1759,151 @@ export default function PlateauViewer() {
       // スライダー操作（Reactのイベントハンドラ、このクロージャの外側）から再計算を
       // トリガーできるようにrefへ登録しておく。
       scheduleDemandTransitRecomputeRef.current = scheduleDemandTransitRecompute;
+      clearDemandTransitAnalysisRef.current = () => {
+        demandTransitAnalysisMembers = null;
+        demandTransitAnalysisSites = null;
+        setDemandTransitPlanAnalysis(null);
+        scheduleDemandTransitRecompute();
+      };
+
+      // 比較用の全域データを必要な時だけ読む。78,542棟ぶんの事前計算ファイルは42MBあるため、
+      // 通常の地図表示・建物色分けだけを見る利用者にはダウンロードさせない。
+      async function ensureNetworkScoreMap(): Promise<Map<string, BuildingNetworkScoreRow> | null> {
+        if (networkScoreMap) return networkScoreMap;
+        setLoadingNetworkScores(true);
+        try {
+          const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
+          if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
+          const rows: BuildingNetworkScoreRow[] = await res.json();
+          if (cancelled) return null;
+          networkScoreMap = new Map(rows.map((row) => [row.buildingId, row]));
+          return networkScoreMap;
+        } catch (err) {
+          console.warn("全域のデマンド交通比較データの読み込みに失敗しました", err);
+          return null;
+        } finally {
+          if (!cancelled) setLoadingNetworkScores(false);
+        }
+      }
+
+      // 1〜10か所の各案を藤沢市北部の住宅系建物全件で一括比較する。全案について地形サンプルを
+      // 取り直すと数十万〜数百万点の問い合わせになり操作待ちが長くなるため、新しい乗り場への
+      // 直線距離に既存経路から得た傾斜負荷倍率を掛けた「概算実効距離」を使う。候補ピンを個別
+      // クリックしたときの表示は、従来どおりsampleTerrainMostDetailedによる詳細計算のまま。
+      let demandTransitAnalysisTimer: number | null = null;
+      let demandTransitAnalysisRunId = 0;
+      async function runDemandTransitAnalysis(runId: number) {
+        if (cancelled || runId !== demandTransitAnalysisRunId) return;
+        setIsDemandTransitAnalysisRunning(true);
+        // すでに全域データを読み込んでいる場合にも、ボタンの「比較中…」表示を描画してから
+        // 約8万棟の集計を始める。
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        const allScores = await ensureNetworkScoreMap();
+        if (cancelled || runId !== demandTransitAnalysisRunId || !allScores) {
+          if (!cancelled && runId === demandTransitAnalysisRunId) {
+            demandTransitAnalysisMembers = null;
+            demandTransitAnalysisSites = null;
+            setDemandTransitPlanAnalysis(null);
+            recomputeDemandTransitCandidates();
+            setIsDemandTransitAnalysisRunning(false);
+          }
+          return;
+        }
+
+        const profile = walkProfileRef.current;
+        // 比較グラフは地図の公式判定とは独立した感度分析。ここでだけ、実効距離に対する
+        // バス300m・駅600mの許容倍率を適用する。道路網モデル用の地図側緩和倍率は混ぜず、
+        // 「この倍率で比較した」と説明できる一つの条件にする。
+        const thresholdMultiplier = demandTransitAnalysisThresholdMultiplierRef.current;
+        const targets: DemandTransitMember[] = [];
+        for (const row of allScores.values()) {
+          const networkBusEffectiveDistanceMeters =
+            profile === "general" ? row.busEffectiveDistanceM_general : row.busEffectiveDistanceM_elderly;
+          const networkStationEffectiveDistanceMeters =
+            profile === "general" ? row.stationEffectiveDistanceM_general : row.stationEffectiveDistanceM_elderly;
+          let busStraightDistanceMeters = row.busNetworkDistanceM;
+          let busEffectiveDistanceMeters = networkBusEffectiveDistanceMeters;
+          let stationEffectiveDistanceMeters = networkStationEffectiveDistanceMeters;
+
+          // 既定の直線距離モデルでは、全域データに含まれる道路網の勾配負荷倍率だけを使い、
+          // 建物〜最寄り停留所/駅の直線距離を全件で再計算する。これにより、地図の既定モデルと
+          // 同じ「直線ベース＋傾斜負荷」の考え方を、表示範囲に依存せず全域へ適用できる。
+          if (distanceModelRef.current === "straight") {
+            let nearestBusDistance = Infinity;
+            for (const stop of majorOperatorStopList) {
+              nearestBusDistance = Math.min(nearestBusDistance, haversineMeters(row.lat, row.lng, stop.lat, stop.lng));
+            }
+            let nearestStationDistance = Infinity;
+            for (const station of trainStationList) {
+              nearestStationDistance = Math.min(
+                nearestStationDistance,
+                haversineMeters(row.lat, row.lng, station.lat, station.lng)
+              );
+            }
+            const busSlopeLoad = Math.min(
+              3,
+              Math.max(1, networkBusEffectiveDistanceMeters / Math.max(row.busNetworkDistanceM, 1))
+            );
+            const stationSlopeLoad = Math.min(
+              3,
+              Math.max(1, networkStationEffectiveDistanceMeters / Math.max(row.stationNetworkDistanceM, 1))
+            );
+            busStraightDistanceMeters = nearestBusDistance;
+            busEffectiveDistanceMeters = nearestBusDistance * busSlopeLoad;
+            stationEffectiveDistanceMeters = nearestStationDistance * stationSlopeLoad;
+          }
+          const coverageRatio = Math.min(
+            busEffectiveDistanceMeters / (BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier),
+            stationEffectiveDistanceMeters / (STATION_COVERAGE_THRESHOLD_METERS * thresholdMultiplier)
+          );
+          if (coverageRatio > DEMAND_TRANSIT_GAP_RATIO_THRESHOLD) {
+            targets.push({
+              lat: row.lat,
+              lng: row.lng,
+              busStraightDistanceMeters,
+              busEffectiveDistanceMeters,
+              stationEffectiveDistanceMeters,
+              coverageRatio,
+            });
+          }
+        }
+        if (targets.length < DEMAND_TRANSIT_MIN_BUILDINGS) {
+          demandTransitAnalysisMembers = null;
+          demandTransitAnalysisSites = null;
+          setDemandTransitPlanAnalysis(null);
+          recomputeDemandTransitCandidates();
+          setIsDemandTransitAnalysisRunning(false);
+          return;
+        }
+
+        const { sites, results } = buildGreedyDemandTransitPlan(targets, 10, thresholdMultiplier);
+
+        if (cancelled || runId !== demandTransitAnalysisRunId) return;
+        setDemandTransitPlanAnalysis({
+          targetBuildingCount: targets.length,
+          scopeLabel: "藤沢市北部全域（住宅系建物78,542棟）",
+          thresholdMultiplier,
+          results,
+        });
+        demandTransitAnalysisMembers = targets;
+        demandTransitAnalysisSites = sites;
+        // スライダーで現在選ばれている件数の候補ピンを、全域の同じ対象建物から再生成する。
+        recomputeDemandTransitCandidates();
+        setIsDemandTransitAnalysisRunning(false);
+      }
+      function scheduleDemandTransitAnalysis(delayMs = 450) {
+        demandTransitAnalysisRunId++;
+        const scheduledRunId = demandTransitAnalysisRunId;
+        if (demandTransitAnalysisTimer) window.clearTimeout(demandTransitAnalysisTimer);
+        setIsDemandTransitAnalysisRunning(true);
+        demandTransitAnalysisTimer = window.setTimeout(() => {
+          demandTransitAnalysisTimer = null;
+          void runDemandTransitAnalysis(scheduledRunId);
+        }, delayMs);
+      }
+      scheduleDemandTransitAnalysisRef.current = scheduleDemandTransitAnalysis;
+      // 初回もボタン操作を求めず、既定条件で全域比較を始める。
+      scheduleDemandTransitAnalysis(0);
 
       async function processTile(tile: Cesium.Cesium3DTile) {
         if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0 || trainStationList.length === 0) return;
@@ -1577,7 +2157,7 @@ export default function PlateauViewer() {
             const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
             if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
             const rows: BuildingNetworkScoreRow[] = await res.json();
-            if (cancelled) return;
+          if (cancelled) return;
             networkScoreMap = new Map(rows.map((r) => [r.buildingId, r]));
           } catch (err) {
             console.warn(
@@ -1763,6 +2343,8 @@ export default function PlateauViewer() {
     return () => {
       cancelled = true;
       scheduleDemandTransitRecomputeRef.current = null;
+      scheduleDemandTransitAnalysisRef.current = null;
+      clearDemandTransitAnalysisRef.current = null;
       applyWalkProfileRef.current = null;
       applyDistanceModelRef.current = null;
       applyNetworkThresholdMultiplierRef.current = null;
@@ -1776,21 +2358,24 @@ export default function PlateauViewer() {
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       <Legend
-        gapThreshold={demandTransitGapThreshold}
         clusterCount={demandTransitClusterCount}
+        analysisThresholdMultiplier={demandTransitAnalysisThresholdMultiplier}
         showHelloCycling={showHelloCycling}
         walkProfile={walkProfile}
         distanceModel={distanceModel}
         loadingNetworkScores={loadingNetworkScores}
         networkThresholdMultiplier={networkThresholdMultiplier}
         showExperimentalDistanceModel={showExperimentalDistanceModel}
-        onGapThresholdChange={(value) => {
-          setDemandTransitGapThreshold(value);
-          scheduleDemandTransitRecomputeRef.current?.();
-        }}
         onClusterCountChange={(value) => {
           setDemandTransitClusterCount(value);
           scheduleDemandTransitRecomputeRef.current?.();
+        }}
+        onAnalysisThresholdMultiplierChange={(value) => {
+          // ドラッグ中の細かな変化はinit側でまとめ、操作が止まった条件だけを再計算する。
+          // 既存のグラフはローディング表示の下に残し、完了時に新条件の結果へ差し替える。
+          demandTransitAnalysisThresholdMultiplierRef.current = value;
+          setDemandTransitAnalysisThresholdMultiplier(value);
+          scheduleDemandTransitAnalysisRef.current?.();
         }}
         onShowHelloCyclingChange={setShowHelloCycling}
         onWalkProfileChange={(value) => {
@@ -1806,9 +2391,21 @@ export default function PlateauViewer() {
           applyNetworkThresholdMultiplierRef.current?.(value);
         }}
         onToggleExperimentalDistanceModel={setShowExperimentalDistanceModel}
+        isDemandTransitAnalysisRunning={isDemandTransitAnalysisRunning}
+        hasDemandTransitAnalysis={demandTransitPlanAnalysis !== null}
+        isDemandTransitPanelVisible={isDemandTransitPanelVisible}
+        onShowDemandTransitPanel={() => setIsDemandTransitPanelVisible(true)}
       />
       <UncoloredBuildingsNote />
       <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
+      <DemandTransitRecommendationPanel
+        analysis={demandTransitPlanAnalysis}
+        selectedCount={demandTransitClusterCount}
+        isRunning={isDemandTransitAnalysisRunning}
+        pendingThresholdMultiplier={demandTransitAnalysisThresholdMultiplier}
+        isVisible={isDemandTransitPanelVisible}
+        onClose={() => setIsDemandTransitPanelVisible(false)}
+      />
       {popup && <InfoPopup info={popup} onClose={() => setPopup(null)} />}
     </div>
   );
