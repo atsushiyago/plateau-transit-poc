@@ -56,3 +56,5 @@ next-env.d.ts
 /scripts/road-network/buildings.json
 /scripts/road-network/buildings_sample.json
 /scripts/road-network/sample_scores.json
+/.codex-build/
+/output/

@@ -44,12 +44,12 @@ const BUS_STOP_PIXEL_SIZE = 10;
 const BUS_STOP_COLOR_MINOR = Cesium.Color.fromCssColorString("#fde68a");
 const BUS_STOP_PIXEL_SIZE_MINOR = BUS_STOP_PIXEL_SIZE;
 
-// 初期カメラの表示範囲（バス停群の重心を中心とした固定半径）。バス停全件（南北東西とも
-// 十数km）にフィットさせると、建物1棟が画面上で数ピクセルしかなく色分けがほぼ見えない状態に
-// なっていた。全件を収める代わりに、重心付近の一定範囲だけを最初から映すことで、開いた直後から
-// 色分けされた建物がある程度画面いっぱいに見えるようにする（残りのエリアはズームアウト/パンして
-// 確認する）。
-const INITIAL_VIEW_RADIUS_METERS = 900;
+// 起動時の初期カメラ表示範囲（ユーザー指定の中心点・半径・角度）。
+const INITIAL_VIEW_CENTER_LNG = 139.44893;
+const INITIAL_VIEW_CENTER_LAT = 35.365;
+const INITIAL_VIEW_RADIUS_METERS = 1213;
+const INITIAL_VIEW_HEADING = 350;
+const INITIAL_VIEW_PITCH = -34.7;
 
 // 実効距離（アクセシビリティスコア）の計算に使う「主要事業者」の判定キーワード。
 // P11データのバス事業者名（P11_002）は藤沢市北部エリアでは「神奈川中央交通（株）」の表記で
@@ -153,7 +153,7 @@ type BuildingNetworkScoreRow = {
 // のでは、という丹野氏からの指摘（2026年8月）を受けて追加。道路網距離モデルの閾値にだけ
 // 調整可能な倍率をかけられるようにする（直線距離モデルは藤沢市公式定義との比較用の
 // ベースラインとして、常に固定の300m/600mのまま変更しない）。
-const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.0;
+const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.2;
 
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
@@ -670,7 +670,6 @@ function Legend({
   onNetworkThresholdMultiplierChange,
   onToggleExperimentalDistanceModel,
   isDemandTransitAnalysisRunning,
-  hasDemandTransitAnalysis,
   isDemandTransitPanelVisible,
   onShowDemandTransitPanel,
 }: {
@@ -690,7 +689,6 @@ function Legend({
   onNetworkThresholdMultiplierChange: (value: number) => void;
   onToggleExperimentalDistanceModel: (value: boolean) => void;
   isDemandTransitAnalysisRunning: boolean;
-  hasDemandTransitAnalysis: boolean;
   isDemandTransitPanelVisible: boolean;
   onShowDemandTransitPanel: () => void;
 }) {
@@ -831,7 +829,7 @@ function Legend({
               <input
                 type="range"
                 min={1}
-                max={3}
+                max={1.5}
                 step={0.1}
                 value={networkThresholdMultiplier}
                 disabled={distanceModel !== "network"}
@@ -949,17 +947,19 @@ function Legend({
       <div style={{ marginTop: 7, color: isDemandTransitAnalysisRunning ? "#d8b4fe" : "rgba(255,255,255,0.7)", fontSize: 11 }}>
         {isDemandTransitAnalysisRunning ? "比較条件を反映中…" : "この比較用の倍率を変えると、グラフは自動で更新されます。"}
       </div>
-      {hasDemandTransitAnalysis && !isDemandTransitPanelVisible && (
+      {!isDemandTransitPanelVisible && (
         <button
           type="button"
           onClick={onShowDemandTransitPanel}
+          disabled={isDemandTransitAnalysisRunning}
           style={{
             width: "100%", marginTop: 6, padding: "5px 8px", border: "1px solid rgba(216,180,254,0.8)",
-            borderRadius: 4, background: "rgba(126,34,206,0.42)", color: "#fff", fontSize: 11,
-            cursor: "pointer",
+            borderRadius: 4, background: isDemandTransitAnalysisRunning ? "rgba(126,34,206,0.25)" : "rgba(126,34,206,0.42)",
+            color: "#fff", fontSize: 11,
+            cursor: isDemandTransitAnalysisRunning ? "wait" : "pointer",
           }}
         >
-          比較グラフを表示
+          {isDemandTransitAnalysisRunning ? "比較データを計算中…" : "比較グラフを表示"}
         </button>
       )}
       <div style={{ marginTop: 6 }}>
@@ -1002,53 +1002,68 @@ function UncoloredBuildingsNote() {
   );
 }
 
-// 面積カバー率（藤沢市北部エリア全体のうち、駅600m or バス300mでカバーされる面積の割合）は、
-// アプリ内でライブ計算すると藤沢市北部全域を格子点でスキャンする必要があり重いため、
-// このセッションでオフラインのPythonスクリプト（Shapelyで藤沢市行政境界ポリゴンを取得し、
-// 50m間隔の格子点21,773点をHaversine直線距離で判定。地形サンプリングはせず傾斜未考慮）で
-// 事前計算した値を定数として埋め込んでいる（2026年8月時点、`public/data/bus-stops.json`の
-// 主要事業者バス停297件・`public/data/train-stations.json`の5駅が対象）。詳細はAGENTS.md参照。
-const OFFLINE_AREA_COVERAGE_RATIO = 0.717;
-// 藤沢市公式資料の面積カバー率（藤沢市全域、メンター自治体への質問で確認）。本PoCの対象は
-// 藤沢市"北部"のみ（交通の便が比較的悪いエリアに絞って可視化する趣旨のため）なので、
-// 藤沢市全域より低めに出ること自体は想定内（詳細はAGENTS.md参照）。
-const OFFICIAL_AREA_COVERAGE_RATIO = 0.78;
 
-// 「建物カバー率」（読み込み済みの住宅系建物のうちカバーされている割合、リアルタイム）と、
-// 「面積カバー率」（上記の事前計算値）を藤沢市公式資料の数値と並べて表示する。左下は
-// 現在未使用の角（左上=Legend、右上=InfoPopup、右下=UncoloredBuildingsNote）。
-function CoverageStatsPanel({ covered, total }: { covered: number; total: number }) {
-  const buildingRatio = total > 0 ? (covered / total) * 100 : null;
+
+// 道路網距離データ読み込みやプロファイル切り替え時に、画面中央のごく一部にコンパクトに表示するローディングバッジ。
+// 全面オーバーレイと異なり、画面全体のマップや建物の色の変化を遮らずに見ることができる。
+function CenterLoadingIndicator({
+  loadingState,
+}: {
+  loadingState: { title: string; subtitle?: string } | null;
+}) {
+  if (!loadingState) return null;
   return (
     <div
       style={{
         position: "absolute",
-        left: 12,
-        // Cesium標準のクレジット表示（"Cesium ion"ロゴ＋著作権テキスト）が画面左下に
-        // デフォルトで表示され、bottom: 12だとこのパネルの最終行（藤沢市公式資料の行）と
-        // 重なって読めなくなっていた。クレジット表示の高さぶん余白を空けて回避する。
-        bottom: 32,
-        zIndex: 10,
-        background: "rgba(20, 20, 20, 0.75)",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        zIndex: 1000,
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 14,
+        padding: "12px 20px",
+        background: "rgba(15, 23, 42, 0.88)",
+        backdropFilter: "blur(8px)",
+        border: "1px solid rgba(56, 189, 248, 0.35)",
+        borderRadius: 12,
+        boxShadow: "0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05)",
         color: "#fff",
-        padding: "8px 10px",
-        borderRadius: 6,
-        fontSize: 11,
-        lineHeight: 1.6,
-        fontFamily: "sans-serif",
-        maxWidth: 280,
         pointerEvents: "none",
+        fontFamily: "sans-serif",
       }}
     >
-      <div style={{ fontWeight: "bold", marginBottom: 2 }}>カバー率（藤沢市公式基準）</div>
-      <div>
-        建物カバー率（読み込み済み{total}棟中、リアルタイム）: {buildingRatio !== null ? `${buildingRatio.toFixed(1)}%` : "計算中…"}
+      <style>{"@keyframes center-loading-spin { to { transform: rotate(360deg); } }"}</style>
+      <div
+        style={{
+          width: 30,
+          height: 30,
+          flexShrink: 0,
+          border: "3.5px solid rgba(56, 189, 248, 0.25)",
+          borderTopColor: "#38bdf8",
+          borderRadius: "50%",
+          animation: "center-loading-spin 0.85s linear infinite",
+        }}
+      />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ color: "#f8fafc", fontSize: 14, fontWeight: "bold", letterSpacing: "0.02em" }}>
+          {loadingState.title}
+        </div>
+        {loadingState.subtitle && (
+          <div style={{ fontSize: 11, color: "#94a3b8" }}>
+            {loadingState.subtitle}
+          </div>
+        )}
       </div>
-      <div>面積カバー率（藤沢市北部・事前計算の格子点分析）: {(OFFLINE_AREA_COVERAGE_RATIO * 100).toFixed(1)}%</div>
-      <div style={{ opacity: 0.75 }}>参考: 藤沢市公式資料（市全域）: {(OFFICIAL_AREA_COVERAGE_RATIO * 100).toFixed(0)}%</div>
     </div>
   );
 }
+
+
+
+
 
 // 追加数を増やしたときの改善の伸びを、数値と小さな棒グラフで同時に見せる。
 // 「最適数」は費用・用地・運行体制で変わるため断定せず、現在スライダーで選んだ案を
@@ -1140,7 +1155,7 @@ function DemandTransitRecommendationPanel({
         fontFamily: "sans-serif",
         pointerEvents: "none",
       }}
-      >
+    >
       <button
         type="button"
         aria-label="アクセス改善比較を閉じる"
@@ -1302,6 +1317,10 @@ export default function PlateauViewer() {
   // "network"に初めて切り替えたときに44.5MBのJSONを遅延読み込みする。読み込み中はtrueにして
   // Legendのラジオボタンを一時的に操作不能にし、多重フェッチを防ぐ。
   const [loadingNetworkScores, setLoadingNetworkScores] = useState(false);
+  // 画面中央のごく一部に表示するコンパクトなローディング状態（道路網距離や高齢者プロファイル切り替え時用）
+  const [centerLoading, setCenterLoading] = useState<{ title: string; subtitle?: string } | null>(
+    null
+  );
   // 【実験的】道路網距離モデルの閾値倍率（詳細はNETWORK_THRESHOLD_MULTIPLIER_DEFAULTのコメント参照）。
   // 直線距離モデルの閾値(300m/600m)は常に固定で、このstateは"network"選択時のみ効く。
   const [networkThresholdMultiplier, setNetworkThresholdMultiplier] = useState(
@@ -1311,10 +1330,6 @@ export default function PlateauViewer() {
   // 開閉状態。初見の審査員が「別の判定基準がある」と誤解しないよう、既定で閉じておく
   // （詳細な経緯はセクション見出しの説明文参照）。
   const [showExperimentalDistanceModel, setShowExperimentalDistanceModel] = useState(false);
-  // カバレッジ統計パネル（画面左下）表示用。processTileが新しい建物をスコア計算するたびに
-  // 更新する（buildingScoreCacheの内容そのものはReact stateの外で管理しているため、
-  // 表示用にこのstateだけ都度setする軽量なミラー）。
-  const [coverageStats, setCoverageStats] = useState({ covered: 0, total: 0 });
   // 「追加数と改善効果を比較」ボタンの結果。計算時点で読み込み済みの建物を対象にするため、
   // カメラ移動で後から建物が増えても、表示済みの比較結果はその時点のスナップショットとして残す。
   const [demandTransitPlanAnalysis, setDemandTransitPlanAnalysis] = useState<DemandTransitPlanAnalysis | null>(null);
@@ -1623,10 +1638,6 @@ export default function PlateauViewer() {
       // 格納する。buildingIdをキーに直接引けるので、該当する建物は地形サンプリング不要で
       // 即座に色を決められる。
       let networkScoreMap: Map<string, BuildingNetworkScoreRow> | null = null;
-      // カバレッジ統計パネル（画面左下）用の累計カウンタ。buildingScoreCacheに新規登録される
-      // たびに更新し、キャッシュヒット（再着色のみ）では増やさない。
-      let scoredCoveredCount = 0;
-      let scoredTotalCount = 0;
       // 勾配プロファイル（一般/高齢者）切り替え用の「世代」カウンタ。applyWalkProfileが
       // 呼ばれるたびに+1し、buildingScoreCacheを空にする。tileScannedGenerationは
       // 「このタイルを最後に処理したときの世代」をタイルごとに記録するWeakMapで、
@@ -1902,8 +1913,8 @@ export default function PlateauViewer() {
         }, delayMs);
       }
       scheduleDemandTransitAnalysisRef.current = scheduleDemandTransitAnalysis;
-      // 初回もボタン操作を求めず、既定条件で全域比較を始める。
-      scheduleDemandTransitAnalysis(0);
+      // 起動時は44.5MBの読み込みと数千万回の計算を走らせず、ユーザーが「比較グラフを表示」を
+      // 押したときに初めて遅延実行する（起動負荷と地名ラベルの脱落を防止するため）。
 
       async function processTile(tile: Cesium.Cesium3DTile) {
         if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0 || trainStationList.length === 0) return;
@@ -1960,8 +1971,6 @@ export default function PlateauViewer() {
           feature.color = color;
           buildingScoreCache.set(buildingId, { color, info });
           featureScoreMap.set(feature, info);
-          scoredTotalCount++;
-          if (info.isCovered) scoredCoveredCount++;
         }
 
         // 【実験的】道路網距離モデルが選択されていて事前計算データが読み込み済みなら、該当する
@@ -2014,7 +2023,6 @@ export default function PlateauViewer() {
         }
 
         if (liveCandidates.length === 0) {
-          setCoverageStats({ covered: scoredCoveredCount, total: scoredTotalCount });
           scheduleDemandTransitRecompute();
           return;
         }
@@ -2112,7 +2120,6 @@ export default function PlateauViewer() {
           };
           recordScore(c.feature, c.buildingId, info);
         });
-        setCoverageStats({ covered: scoredCoveredCount, total: scoredTotalCount });
 
         scheduleDemandTransitRecompute();
       }
@@ -2134,16 +2141,26 @@ export default function PlateauViewer() {
       // scoreGenerationを進めてキャッシュを空にするだけで、実際の再計算はprocessTileIfNeededが
       // tileVisibleイベント経由で自己修復的に行う（画面内のタイルは次のフレームで、画面外の
       // タイルも後で映ったときに正しく再計算される）。
-      function applyWalkProfile(profile: WalkProfile) {
+      async function applyWalkProfile(profile: WalkProfile) {
         walkProfileRef.current = profile;
+        setCenterLoading({
+          title: `${WALK_PROFILES[profile].label}を反映中…`,
+          subtitle: "建物の坂道負荷・歩行速度を再計算しています",
+        });
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
         scoreGeneration++;
         buildingScoreCache.clear();
-        scoredCoveredCount = 0;
-        scoredTotalCount = 0;
-        setCoverageStats({ covered: 0, total: 0 });
         scheduleDemandTransitRecompute();
+
+        // 画面内のタイルが再評価・再着色される時間を少し確保してスムーズに解除する
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+        if (!cancelled) {
+          setCenterLoading(null);
+        }
       }
-      applyWalkProfileRef.current = applyWalkProfile;
+      applyWalkProfileRef.current = (profile) => {
+        void applyWalkProfile(profile);
+      };
 
       // 【実験的】直線距離モデル/道路網距離モデルの切り替え。"network"に初めて切り替えたときだけ
       // 44.5MBのbuilding-network-scores.jsonを遅延フェッチする（デフォルトの直線距離モデルしか
@@ -2151,32 +2168,51 @@ export default function PlateauViewer() {
       // 同じ要領でscoreGenerationを進めてキャッシュを無効化し、tileVisible経由の自己修復に任せる。
       async function applyDistanceModel(model: DistanceModel) {
         distanceModelRef.current = model;
-        if (model === "network" && !networkScoreMap) {
+        if (model === "network") {
           setLoadingNetworkScores(true);
-          try {
-            const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
-            if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
-            const rows: BuildingNetworkScoreRow[] = await res.json();
-          if (cancelled) return;
-            networkScoreMap = new Map(rows.map((r) => [r.buildingId, r]));
-          } catch (err) {
-            console.warn(
-              "道路網距離モデルのデータ読み込みに失敗しました。直線距離モデルのままにします。",
-              err
-            );
-            distanceModelRef.current = "straight";
-            setDistanceModel("straight");
-            setLoadingNetworkScores(false);
-            return;
+          setCenterLoading({
+            title: "道路網距離を反映中…",
+            subtitle: networkScoreMap
+              ? "建物の道路ネットワーク距離を再評価しています"
+              : "道路網距離データ（44.5MB）を読み込んでいます",
+          });
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
+          if (!networkScoreMap) {
+            try {
+              const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
+              if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
+              const rows: BuildingNetworkScoreRow[] = await res.json();
+              if (cancelled) return;
+              networkScoreMap = new Map(rows.map((r) => [r.buildingId, r]));
+            } catch (err) {
+              console.warn(
+                "道路網距離モデルのデータ読み込みに失敗しました。直線距離モデルのままにします。",
+                err
+              );
+              distanceModelRef.current = "straight";
+              setDistanceModel("straight");
+              setLoadingNetworkScores(false);
+              setCenterLoading(null);
+              return;
+            }
           }
-          setLoadingNetworkScores(false);
+        } else {
+          setCenterLoading({
+            title: "直線距離モデルを反映中…",
+            subtitle: "建物の直線距離を再評価しています",
+          });
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
         }
         scoreGeneration++;
         buildingScoreCache.clear();
-        scoredCoveredCount = 0;
-        scoredTotalCount = 0;
-        setCoverageStats({ covered: 0, total: 0 });
         scheduleDemandTransitRecompute();
+
+        // 画面内のタイルが再評価・再着色される時間を少し確保してスムーズに解除する
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+        if (!cancelled) {
+          setLoadingNetworkScores(false);
+          setCenterLoading(null);
+        }
       }
       applyDistanceModelRef.current = (model) => {
         void applyDistanceModel(model);
@@ -2191,9 +2227,6 @@ export default function PlateauViewer() {
         networkThresholdMultiplierRef.current = multiplier;
         scoreGeneration++;
         buildingScoreCache.clear();
-        scoredCoveredCount = 0;
-        scoredTotalCount = 0;
-        setCoverageStats({ covered: 0, total: 0 });
         scheduleDemandTransitRecompute();
       }
       applyNetworkThresholdMultiplierRef.current = applyNetworkThresholdMultiplier;
@@ -2324,18 +2357,19 @@ export default function PlateauViewer() {
         }
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-      // カメラはバス停群の重心付近、固定半径（INITIAL_VIEW_RADIUS_METERS）に自動フィットする。
-      // viewer.flyTo(entities, ...)は地形解決待ちでハングすることがあるため使わず
-      // （plateau-pocで発覚した問題の再発防止）、生の頂点座標からBoundingSphereを自前計算して
-      // flyToBoundingSphereで移動する。バス停全件（南北東西とも十数km）を収める広域フィットだと
-      // 建物1棟が数ピクセルしかなく色分けがほぼ見えないため、重心を中心にした固定半径にしている。
-      if (busStopPositions.length > 0) {
-        const centroid = Cesium.BoundingSphere.fromPoints(busStopPositions).center;
-        const sphere = new Cesium.BoundingSphere(centroid, INITIAL_VIEW_RADIUS_METERS);
-        viewer.camera.flyToBoundingSphere(sphere, {
-          offset: new Cesium.HeadingPitchRange(Cesium.Math.toRadians(20), Cesium.Math.toRadians(-30)),
-        });
-      }
+      // 起動時のカメラ視点を設定（BoundingSphereで中心点と半径を合わせる）。
+      const center = Cesium.Cartesian3.fromDegrees(
+        INITIAL_VIEW_CENTER_LNG,
+        INITIAL_VIEW_CENTER_LAT
+      );
+      const sphere = new Cesium.BoundingSphere(center, INITIAL_VIEW_RADIUS_METERS);
+      viewer.camera.flyToBoundingSphere(sphere, {
+        offset: new Cesium.HeadingPitchRange(
+          Cesium.Math.toRadians(INITIAL_VIEW_HEADING),
+          Cesium.Math.toRadians(INITIAL_VIEW_PITCH)
+        ),
+        duration: 0,
+      });
     }
 
     init();
@@ -2375,15 +2409,28 @@ export default function PlateauViewer() {
           // 既存のグラフはローディング表示の下に残し、完了時に新条件の結果へ差し替える。
           demandTransitAnalysisThresholdMultiplierRef.current = value;
           setDemandTransitAnalysisThresholdMultiplier(value);
-          scheduleDemandTransitAnalysisRef.current?.();
+          if (demandTransitPlanAnalysis || isDemandTransitPanelVisible) {
+            scheduleDemandTransitAnalysisRef.current?.();
+          }
         }}
         onShowHelloCyclingChange={setShowHelloCycling}
         onWalkProfileChange={(value) => {
           setWalkProfile(value);
+          setCenterLoading({
+            title: `${WALK_PROFILES[value].label}を反映中…`,
+            subtitle: "建物の坂道負荷・歩行速度を再計算しています",
+          });
           applyWalkProfileRef.current?.(value);
         }}
         onDistanceModelChange={(value) => {
           setDistanceModel(value);
+          setCenterLoading({
+            title: value === "network" ? "道路網距離を反映中…" : "直線距離モデルを反映中…",
+            subtitle: "建物の距離基準を切り替えています",
+          });
+          if (value === "network") {
+            setLoadingNetworkScores(true);
+          }
           applyDistanceModelRef.current?.(value);
         }}
         onNetworkThresholdMultiplierChange={(value) => {
@@ -2392,12 +2439,15 @@ export default function PlateauViewer() {
         }}
         onToggleExperimentalDistanceModel={setShowExperimentalDistanceModel}
         isDemandTransitAnalysisRunning={isDemandTransitAnalysisRunning}
-        hasDemandTransitAnalysis={demandTransitPlanAnalysis !== null}
         isDemandTransitPanelVisible={isDemandTransitPanelVisible}
-        onShowDemandTransitPanel={() => setIsDemandTransitPanelVisible(true)}
+        onShowDemandTransitPanel={() => {
+          setIsDemandTransitPanelVisible(true);
+          if (!demandTransitPlanAnalysis && !isDemandTransitAnalysisRunning) {
+            scheduleDemandTransitAnalysisRef.current?.(0);
+          }
+        }}
       />
       <UncoloredBuildingsNote />
-      <CoverageStatsPanel covered={coverageStats.covered} total={coverageStats.total} />
       <DemandTransitRecommendationPanel
         analysis={demandTransitPlanAnalysis}
         selectedCount={demandTransitClusterCount}
@@ -2407,6 +2457,7 @@ export default function PlateauViewer() {
         onClose={() => setIsDemandTransitPanelVisible(false)}
       />
       {popup && <InfoPopup info={popup} onClose={() => setPopup(null)} />}
+      <CenterLoadingIndicator loadingState={centerLoading} />
     </div>
   );
 }
