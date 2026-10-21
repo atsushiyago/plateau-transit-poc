@@ -11,3 +11,7 @@ scripts/road-network/*.pkl
 scripts/road-network/buildings.json
 scripts/road-network/buildings_sample.json
 scripts/road-network/sample_scores.json
+# 2026年8月の旧分析出力。アプリでは使わず、必要ならスクリプトから再生成できる。
+scripts/road-network/overlooked_gaps.geojson
+scripts/road-network/overlooked_gaps_map.png
+scripts/road-network/overlooked_gaps_summary.json
