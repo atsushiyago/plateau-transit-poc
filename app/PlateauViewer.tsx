@@ -986,9 +986,12 @@ function DemandTransitRecommendationPanel({
                 gap: 9,
                 minHeight: 48,
                 marginBottom: 5,
-                padding: isSelected ? "3px 5px" : 0,
-                borderRadius: 4,
+                boxSizing: "border-box",
+                padding: "3px 7px",
+                border: isSelected ? "2px solid #d8b4fe" : "2px solid transparent",
+                borderRadius: 7,
                 background: isSelected ? "rgba(192,132,252,0.16)" : "transparent",
+                boxShadow: isSelected ? "0 0 0 1px rgba(216,180,254,0.2)" : "none",
               }}
             >
               <span
@@ -1011,7 +1014,7 @@ function DemandTransitRecommendationPanel({
                         display: "block",
                         width: `${Math.max(2, (resultReduction / maxReduction) * 100)}%`,
                         height: "100%",
-                        background: isSelected ? "#c084fc" : "#60a5fa",
+                        background: "#60a5fa",
                       }}
                     />
                   </span>
@@ -1025,7 +1028,7 @@ function DemandTransitRecommendationPanel({
                         display: "block",
                         width: `${Math.max(2, (farthestReduction / maxFarthestReduction) * 100)}%`,
                         height: "100%",
-                        background: isSelected ? "#fbbf24" : "#f59e0b",
+                        background: "#f59e0b",
                       }}
                     />
                   </span>
