@@ -13,8 +13,8 @@ from elevation import ElevationProvider  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
-BUS_STOPS_JSON = REPO_ROOT / "public" / "data" / "bus-stops.json"
-TRAIN_STATIONS_JSON = REPO_ROOT / "public" / "data" / "train-stations.json"
+BUS_STOPS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
+TRAIN_STATIONS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
 
 MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通"]
 BUS_COVERAGE_THRESHOLD_METERS = 300

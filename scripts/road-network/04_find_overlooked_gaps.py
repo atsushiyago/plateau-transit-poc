@@ -23,8 +23,8 @@ SCRIPT_DIR = Path(__file__).parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 BUILDINGS_JSON = SCRIPT_DIR / "buildings.json"
 NETWORK_SCORES_JSON = REPO_ROOT / "public" / "data" / "building-network-scores.json"
-BUS_STOPS_JSON = REPO_ROOT / "public" / "data" / "bus-stops.json"
-TRAIN_STATIONS_JSON = REPO_ROOT / "public" / "data" / "train-stations.json"
+BUS_STOPS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
+TRAIN_STATIONS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
 OUTPUT_GEOJSON = SCRIPT_DIR / "overlooked_gaps.geojson"
 OUTPUT_SUMMARY = SCRIPT_DIR / "overlooked_gaps_summary.json"
 

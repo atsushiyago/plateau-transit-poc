@@ -8,6 +8,15 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
+# 2026-10-21 修正・現行仕様（過去の記録より優先）
+
+- 色分けは「藤沢市の距離閾値を参考にした独自推計」。傾斜補正・主要事業者限定・北部住宅系建物という条件を市の公式判定と同一視しない。
+- 表示用バス停337件は維持。分析用は`analysis-facilities.json`を使用し、市境・東海道線の外側を含む周辺矩形の神奈川中央交通765停留所・25駅。追加駅は国土数値情報N02 2022年度の代表点、既存5駅はOSM座標。再抽出スクリプトは`00_extract_facilities.py`。
+- 道路網の投影点は同一道路上の順序で分割接続。施設のアクセス距離と勾配を経路探索に含める。全78,542棟を再生成済み。`building-network-scores.json`と`routing-graph.json`は共通の版IDを持ち同時に配布する。
+- 全域比較はWeb Worker。道路網モデルは概算で選んだ候補を道路上に補正し、改善前後を同じ道路網で評価。直線モデルの全域比較は傾斜倍率を使う概算で、地図の地形サンプリングとの差をUIで明示。
+- タイルの非同期計算には世代チェック。通信失敗はバックオフ後に再試行。モデル未収録の建物を直線モデルへ暗黙に混ぜない。候補選択・閉じる・設定変更で古いポップアップ応答を無効化。
+- 検証は`npm test`、Python unittest、lint、型チェック、本番ビルド。過去のカバー率・`overlooked_gaps*`は旧条件の記録。現行の数値は`scripts/road-network/README.md`参照。
+
 # プロジェクト概要
 
 PLATEAU CityHack Challenge 2026（藤沢市がメンター自治体）向けのアプリ。姉妹プロジェクト`plateau-poc`（江の島・津波避難テーマ）で得た知見をベースに、別テーマで新規に立ち上げたPoC。

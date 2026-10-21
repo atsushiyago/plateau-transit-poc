@@ -1,5 +1,8 @@
 "use client";
 
+import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite } from "./lib/transit-analysis";
+import { TileWorkGate } from "./lib/async-generation";
+import type { AnalysisResponse } from "./workers/transit-analysis.worker";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as Cesium from "cesium";
 
@@ -63,18 +66,13 @@ function isMajorOperatorStop(stop: BusStop): boolean {
 type BusRoute = { name: string; classCode: string | null };
 type BusStop = { name: string; lat: number; lng: number; operator: string; routes: BusRoute[] };
 
-// 鉄道駅データ（藤沢市北部、5駅）。新規にOverpassクエリを実行したものではなく、
-// `public/data/place-labels.json`の抽出時（AGENTS.md「地名ラベル・逆ジオコーディングについて」
-// 第1段階、railway=station/halt）で既に取得済みだった5駅（六会日大前・善行・湘南台・
-// 藤沢本町・長後）をそのまま切り出したもの。place-labels.jsonは表示用でtype情報を持たないため、
-// 判定計算用に別ファイルとして`train-stations.json`を用意している。
-const TRAIN_STATIONS_JSON_URL = "/data/train-stations.json";
+// 分析用施設はanalysis-facilities.json。市境・東海道線で利用先を切らない。
 type TrainStation = { name: string; lat: number; lng: number };
 
 // 藤沢市公式の「交通空白地」定義（メンター自治体への質問への回答で確認済み、2026年8月）:
 // 「鉄道駅から600m圏、バス停から300m圏（高齢者の移動を考慮した基準）に入らないエリア」。
 // このPoCでは傾斜込みの実効距離をこの2つの閾値と比較し、どちらか一方でも満たせば
-// 「カバーされている」と判定する（OR条件）。詳細はAGENTS.md「藤沢市公式の交通空白地判定基準への
+// 「カバーされている」と判定する（OR条件）。詳細はAGENTS.md「藤沢市の距離基準を参考にした独自推計への
 // 切替について」参照。
 const STATION_COVERAGE_THRESHOLD_METERS = 600;
 const BUS_COVERAGE_THRESHOLD_METERS = 300;
@@ -112,13 +110,6 @@ const SLOPE_GRADIENT_CAP = 0.4;
 // - slopePenaltyFactor: 「坂道への負荷が一般よりも大きい」という定性的な方向性を、一般の2倍という
 //   単純な係数で表現しただけで、根拠となる調査データがあるわけではない
 // 実務利用の際は、藤沢市側の知見（バス・鉄道担当者と共有予定とのこと）を踏まえて調整することを想定している。
-type WalkProfile = "general" | "elderly";
-const WALK_PROFILES: Record<WalkProfile, { label: string; slopePenaltyFactor: number; walkSpeedMPerMin: number }> = {
-  // 勾配1あたり実効距離を何倍割り増しするかの係数。例: 勾配0.1(10%)ならslopePenaltyFactor=3で
-  // 実効距離が1.3倍になる。徒歩速度は分速67m≒時速4kmが一般的な成人の目安。
-  general: { label: "一般", slopePenaltyFactor: 3, walkSpeedMPerMin: 67 },
-  elderly: { label: "高齢者（坂道に配慮）", slopePenaltyFactor: 6, walkSpeedMPerMin: 50 },
-};
 const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 
 // 【feature/road-network-distanceブランチ限定・実験的】直線距離モデル（デフォルト、mainと同じ
@@ -127,27 +118,6 @@ const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 // ユーザーから「別ブランチで動かしたら空白地の色付けがどれくらい変わるのか見たい」との要望を受けて、
 // mainとブランチを行き来せず同じ画面上で比較できるよう追加した（あくまで視覚比較用の一時的な
 // 実装であり、本採用するかどうかは別途判断する）。
-type DistanceModel = "straight" | "network";
-const DISTANCE_MODEL_DEFAULT: DistanceModel = "straight";
-const BUILDING_NETWORK_SCORES_JSON_URL = "/data/building-network-scores.json";
-type BuildingNetworkScoreRow = {
-  buildingId: string;
-  lat: number;
-  lng: number;
-  usage: string;
-  totalFloorArea: number | null;
-  busNetworkDistanceM: number;
-  stationNetworkDistanceM: number;
-  busEffectiveDistanceM_general: number;
-  stationEffectiveDistanceM_general: number;
-  coverageRatio_general: number;
-  busEffectiveDistanceM_elderly: number;
-  stationEffectiveDistanceM_elderly: number;
-  coverageRatio_elderly: number;
-  nearestStopName: string;
-  nearestStationName: string;
-};
-
 // 【feature/road-network-distanceブランチ限定・実験的】道路網距離は直線距離より系統的に長くなる
 // ため、直線距離モデルと同じ300m/600mの閾値をそのまま道路網距離に適用すると判定が「厳しすぎる」
 // のでは、という丹野氏からの指摘（2026年8月）を受けて追加。道路網距離モデルの閾値にだけ
@@ -175,15 +145,6 @@ function colorForCoverageRatio(ratio: number): Cesium.Color {
   return rank.color;
 }
 
-const EARTH_RADIUS_METERS = 6371000;
-function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a =
-    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return EARTH_RADIUS_METERS * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
 
 function lineLatAtLon(points: [number, number][], lon: number): number {
   if (lon <= points[0][0]) return points[0][1];
@@ -225,32 +186,6 @@ type BuildingScoreInfo = {
 
 // 乗り場増設案の比較結果。候補地点を一つずつクリックしなくても、追加数ごとの
 // 改善度を確認できるようにする。
-type DemandTransitPlanResult = {
-  count: number;
-  averageBeforeMeters: number;
-  averageAfterMeters: number;
-  farthestTenPercentBeforeMeters: number;
-  farthestTenPercentAfterMeters: number;
-  newlyCoveredBuildings: number;
-  severeGapBeforeBuildings: number;
-  severeGapAfterBuildings: number;
-};
-type DemandTransitPlanAnalysis = {
-  targetBuildingCount: number;
-  scopeLabel: string;
-  thresholdMultiplier: number;
-  results: DemandTransitPlanResult[];
-};
-type DemandTransitMember = {
-  lat: number;
-  lng: number;
-  busStraightDistanceMeters: number;
-  busEffectiveDistanceMeters: number;
-  stationEffectiveDistanceMeters: number;
-  coverageRatio: number;
-};
-type DemandTransitPlanSite = { lat: number; lng: number; x: number; y: number };
-
 // 2点間の傾斜込み実効距離を計算する共通ロジック。住宅系建物の色分け（最寄りバス停まで）と、
 // デマンド交通乗り場候補の「もしここに乗り場を新設したら」の再計算の両方で使う
 // （後者は単に目的地を既存バス停群からクラスタ重心に差し替えて同じ関数を呼ぶだけでよい）。
@@ -284,7 +219,8 @@ async function computeEffectiveDistances(
   return pairs.map((_, idx) => {
     const straightDistanceMeters = straightDistances[idx];
     const [start, end] = sampleRanges[idx];
-    const heights = sampled.slice(start, end).map((carto) => carto.height ?? 0);
+    const heights = sampled.slice(start, end).map((carto) => carto.height);
+    if (heights.some(height => !Number.isFinite(height))) throw new Error("地形の標高が欠測しています");
     const segmentDistance = straightDistanceMeters / (SLOPE_SAMPLE_COUNT - 1);
     let effectiveDistanceMeters = 0;
     for (let k = 0; k < heights.length - 1; k++) {
@@ -303,7 +239,7 @@ async function computeEffectiveDistances(
 const DEMAND_TRANSIT_GAP_RATIO_THRESHOLD = 1.0;
 const DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT = 4;
 // 比較分析では、実効距離に対してバス300m・駅600mをそのまま適用するか、坂道等による
-// 上乗せを見込んで何倍まで許容するかを別途選べるようにする。これは地図の公式判定を
+// 上乗せを見込んで何倍まで許容するかを別途選べるようにする。これは地図の独自推計を
 // 変えるものではなく、乗り場追加案の感度分析専用の条件である。
 // 徒歩経路の一般的な迂回率（約1.2）を、比較分析の初期条件に採用する。
 const DEMAND_TRANSIT_ANALYSIS_THRESHOLD_MULTIPLIER_DEFAULT = 1.2;
@@ -372,181 +308,6 @@ const HELLO_CYCLING_COLOR = "#facc15";
 // 対象エリアが藤沢市北部（東西南北とも十数km程度）に限られるため、緯度経度を
 // 単純な等距円筒図法でメートル相当のローカルXY座標に変換して使う（k-meansのユークリッド距離が
 // 経度方向で不当に圧縮/伸長されるのを避けるため。全国精度は不要という他の判定と同じ方針）。
-function projectToLocalMeters(lat: number, lng: number, refLat: number, refLng: number): [number, number] {
-  const refLatRad = (refLat * Math.PI) / 180;
-  return [(lng - refLng) * 111320 * Math.cos(refLatRad), (lat - refLat) * 110540];
-}
-function unprojectFromLocalMeters(x: number, y: number, refLat: number, refLng: number): [number, number] {
-  const refLatRad = (refLat * Math.PI) / 180;
-  return [refLat + y / 110540, refLng + x / (111320 * Math.cos(refLatRad))];
-}
-
-// シンプルなk-means実装（Lloyd法）。既存の依存関係に軽量なk-means実装が無いため自前で用意する。
-// 初期中心点はx座標でソートしてk等分した位置から選ぶ決定的な方法（乱数を使わず、毎回同じ結果になる）。
-function kMeans(
-  points: [number, number][],
-  k: number,
-  maxIterations = 20
-): { centroid: [number, number]; indices: number[] }[] {
-  if (points.length === 0 || k <= 0) return [];
-  const effectiveK = Math.min(k, points.length);
-  const sortedIndices = [...points.keys()].sort((a, b) => points[a][0] - points[b][0]);
-  let centroids: [number, number][] = Array.from({ length: effectiveK }, (_, i) => {
-    const idx = sortedIndices[Math.floor(((i + 0.5) * points.length) / effectiveK)];
-    return [points[idx][0], points[idx][1]];
-  });
-  const assignments = new Array(points.length).fill(-1);
-
-  for (let iter = 0; iter < maxIterations; iter++) {
-    let changed = false;
-    for (let i = 0; i < points.length; i++) {
-      let best = 0;
-      let bestDist = Infinity;
-      for (let c = 0; c < effectiveK; c++) {
-        const dx = points[i][0] - centroids[c][0];
-        const dy = points[i][1] - centroids[c][1];
-        const d = dx * dx + dy * dy;
-        if (d < bestDist) {
-          bestDist = d;
-          best = c;
-        }
-      }
-      if (assignments[i] !== best) {
-        assignments[i] = best;
-        changed = true;
-      }
-    }
-
-    const sums: [number, number][] = Array.from({ length: effectiveK }, () => [0, 0]);
-    const counts = new Array(effectiveK).fill(0);
-    for (let i = 0; i < points.length; i++) {
-      const c = assignments[i];
-      sums[c][0] += points[i][0];
-      sums[c][1] += points[i][1];
-      counts[c]++;
-    }
-    centroids = centroids.map((prev, c) => (counts[c] > 0 ? [sums[c][0] / counts[c], sums[c][1] / counts[c]] : prev));
-
-    if (!changed) break;
-  }
-
-  const groups: number[][] = Array.from({ length: effectiveK }, () => []);
-  for (let i = 0; i < points.length; i++) {
-    groups[assignments[i]].push(i);
-  }
-  return centroids.map((centroid, c) => ({ centroid, indices: groups[c] })).filter((g) => g.indices.length > 0);
-}
-
-// 乗り場候補は、交通空白地の建物を400m格子にまとめた重心から選ぶ。各手順で「既存バス停と
-// すでに選んだ乗り場のうち最も近い距離」を更新し、総短縮量が最も大きい地点を一つだけ追加する。
-// これにより、k-meansのように候補数ごとに配置全体が入れ替わらず、1か所案→2か所案→…が
-// 必ず入れ子になる。実際の道路沿いの設置可否は別途確認が必要だが、追加数比較の目的関数を
-// 「建物の散らばり」ではなく「交通アクセスの改善」に揃えられる。
-const DEMAND_TRANSIT_CANDIDATE_GRID_METERS = 400;
-function buildGreedyDemandTransitPlan(
-  members: DemandTransitMember[],
-  maxSites: number,
-  thresholdMultiplier: number
-): { sites: DemandTransitPlanSite[]; results: DemandTransitPlanResult[] } {
-  const refLat = members.reduce((sum, building) => sum + building.lat, 0) / members.length;
-  const refLng = members.reduce((sum, building) => sum + building.lng, 0) / members.length;
-  const points = members.map((building) => projectToLocalMeters(building.lat, building.lng, refLat, refLng));
-  const slopeLoads = members.map((building) =>
-    Math.min(3, Math.max(1, building.busEffectiveDistanceMeters / Math.max(building.busStraightDistanceMeters, 1)))
-  );
-
-  const grid = new Map<string, { xSum: number; ySum: number; count: number }>();
-  points.forEach(([x, y]) => {
-    const key = `${Math.floor(x / DEMAND_TRANSIT_CANDIDATE_GRID_METERS)},${Math.floor(y / DEMAND_TRANSIT_CANDIDATE_GRID_METERS)}`;
-    const cell = grid.get(key) ?? { xSum: 0, ySum: 0, count: 0 };
-    cell.xSum += x;
-    cell.ySum += y;
-    cell.count++;
-    grid.set(key, cell);
-  });
-  const candidateSites: DemandTransitPlanSite[] = [...grid.values()].map((cell) => {
-    const x = cell.xSum / cell.count;
-    const y = cell.ySum / cell.count;
-    const [lat, lng] = unprojectFromLocalMeters(x, y, refLat, refLng);
-    return { lat, lng, x, y };
-  });
-
-  const currentDistances = members.map((building) => building.busEffectiveDistanceMeters);
-  const averageBeforeMeters = currentDistances.reduce((sum, distance) => sum + distance, 0) / members.length;
-  const farthestCount = Math.max(1, Math.ceil(members.length * 0.1));
-  const farthestIndices = new Set(
-    [...members.keys()]
-      .sort((a, b) => members[b].busEffectiveDistanceMeters - members[a].busEffectiveDistanceMeters)
-      .slice(0, farthestCount)
-  );
-  const farthestTenPercentBeforeMeters =
-    [...farthestIndices].reduce((sum, index) => sum + members[index].busEffectiveDistanceMeters, 0) / farthestCount;
-  const severeGapBeforeBuildings = members.filter((building) => building.coverageRatio > 1.5).length;
-  const selectedCandidateIndices = new Set<number>();
-  const sites: DemandTransitPlanSite[] = [];
-  const results: DemandTransitPlanResult[] = [];
-
-  for (let step = 0; step < Math.min(maxSites, candidateSites.length); step++) {
-    let bestCandidateIndex = -1;
-    let bestTotalImprovement = -Infinity;
-    for (let candidateIndex = 0; candidateIndex < candidateSites.length; candidateIndex++) {
-      if (selectedCandidateIndices.has(candidateIndex)) continue;
-      const candidate = candidateSites[candidateIndex];
-      let totalImprovement = 0;
-      for (let i = 0; i < members.length; i++) {
-        const dx = points[i][0] - candidate.x;
-        const dy = points[i][1] - candidate.y;
-        const candidateDistance = Math.sqrt(dx * dx + dy * dy) * slopeLoads[i];
-        if (candidateDistance < currentDistances[i]) totalImprovement += currentDistances[i] - candidateDistance;
-      }
-      if (totalImprovement > bestTotalImprovement) {
-        bestTotalImprovement = totalImprovement;
-        bestCandidateIndex = candidateIndex;
-      }
-    }
-    if (bestCandidateIndex < 0) break;
-
-    selectedCandidateIndices.add(bestCandidateIndex);
-    const selectedSite = candidateSites[bestCandidateIndex];
-    sites.push(selectedSite);
-    for (let i = 0; i < members.length; i++) {
-      const dx = points[i][0] - selectedSite.x;
-      const dy = points[i][1] - selectedSite.y;
-      const candidateDistance = Math.sqrt(dx * dx + dy * dy) * slopeLoads[i];
-      if (candidateDistance < currentDistances[i]) currentDistances[i] = candidateDistance;
-    }
-
-    let farthestAfterTotal = 0;
-    let newlyCoveredBuildings = 0;
-    let severeGapAfterBuildings = 0;
-    for (let i = 0; i < members.length; i++) {
-      const afterDistance = currentDistances[i];
-      if (farthestIndices.has(i)) farthestAfterTotal += afterDistance;
-      if (members[i].coverageRatio > 1 && afterDistance <= BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier) {
-        newlyCoveredBuildings++;
-      }
-      const coverageRatioAfter = Math.min(
-        afterDistance / (BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier),
-        members[i].stationEffectiveDistanceMeters / (STATION_COVERAGE_THRESHOLD_METERS * thresholdMultiplier)
-      );
-      if (coverageRatioAfter > 1.5) severeGapAfterBuildings++;
-    }
-    results.push({
-      count: sites.length,
-      averageBeforeMeters,
-      averageAfterMeters: currentDistances.reduce((sum, distance) => sum + distance, 0) / members.length,
-      farthestTenPercentBeforeMeters,
-      farthestTenPercentAfterMeters: farthestAfterTotal / farthestCount,
-      newlyCoveredBuildings,
-      severeGapBeforeBuildings,
-      severeGapAfterBuildings,
-    });
-  }
-  return { sites, results };
-}
-
-// デマンド交通乗り場候補ピンを、既存の丸ピン（バス停等）と見た目で区別するため、
-// canvasで紫の四角アイコンを生成してbillboard画像として使う。
 function createSquareIconDataUrl(fillColor: string, size = 28): string {
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -724,9 +485,9 @@ function Legend({
         overflowY: "auto",
       }}
     >
-      <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市公式の交通空白地判定基準</div>
+      <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市の距離基準を参考にした独自推計</div>
       <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-        鉄道駅600m圏 or バス停300m圏（いずれも傾斜考慮の実効距離）のOR判定
+        鉄道駅600m／バス停300mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
       </div>
       {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
@@ -841,7 +602,7 @@ function Legend({
                 style={{ width: "100%" }}
               />
               <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-                道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの公式基準にこの倍率をかけて判定を緩和できます（直線距離モデルは常に公式基準のまま固定）。
+                道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの参考基準にこの倍率をかけて判定を緩和できます（直線距離モデルは300m／600mの閾値で固定）。
               </div>
             </div>
           </>
@@ -945,7 +706,7 @@ function Legend({
           style={{ width: "100%" }}
         />
         <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-          比較グラフだけに適用します。バス{Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m・駅{Math.round(STATION_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m相当で、実効距離を評価します。地図の公式判定は変わりません。
+          比較グラフだけに適用します。バス{Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m・駅{Math.round(STATION_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m相当で、実効距離を評価します。地図の独自推計は変わりません。
         </div>
       </div>
       <div style={{ marginTop: 7, color: isDemandTransitAnalysisRunning ? "#d8b4fe" : "rgba(255,255,255,0.7)", fontSize: 11 }}>
@@ -1001,7 +762,7 @@ function UncoloredBuildingsNote() {
         pointerEvents: "none",
       }}
     >
-      白い建物は色分けの対象外です（住宅系以外の用途、または用途不明の建物。表示直後は読み込み中の場合もあります）
+      白い建物は住宅系以外・用途不明・未評価です。読み込み中、通信失敗、道路網データ未収録の場合も白く表示されます。
     </div>
   );
 }
@@ -1122,7 +883,7 @@ function DemandTransitRecommendationPanel({
       </div>
     );
   }
-  const selected = analysis.results.find((result) => result.count === selectedCount);
+  const selected = analysis.results.find((result) => result.count === selectedCount) ?? analysis.results.at(-1);
   if (!selected) return null;
   const maxReduction = Math.max(
     ...analysis.results.map((result) => result.averageBeforeMeters - result.averageAfterMeters),
@@ -1276,10 +1037,10 @@ function DemandTransitRecommendationPanel({
         })}
       </div>
       <div style={{ marginTop: 12, color: "#cbd5e1", fontSize: 13 }}>
-        各行は、前の案で選んだ地点を残したまま、交通アクセスの短縮量が最も大きくなる地点を一つずつ追加した案です。
+        各行は、前の案で選んだ地点を残したまま、概算上の短縮量が最も大きい地点を一つずつ追加した案です。
       </div>
       <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
-        {analysis.scopeLabel}の比較対象 {analysis.targetBuildingCount.toLocaleString()}棟を比較。遠い10%は追加前に最も遠かった建物群を固定して比較しています。候補地点への直線距離に、既存経路の傾斜負荷を反映した概算です。用地・運行費用は含みません。
+        {analysis.scopeLabel}の比較対象 {analysis.targetBuildingCount.toLocaleString()}棟を比較。遠い10%は追加前に最も遠かった建物群を固定して比較しています。{analysis.methodLabel} 用地・運行費用は含みません。
       </div>
       {isRunning && (
         <div
@@ -1300,6 +1061,9 @@ function DemandTransitRecommendationPanel({
 }
 
 export default function PlateauViewer() {
+  const popupRequestRef = useRef(0);
+  const candidatePopupRef = useRef(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Cesium.Viewer | null>(null);
   const [popup, setPopup] = useState<PopupInfo | null>(null);
@@ -1322,7 +1086,7 @@ export default function PlateauViewer() {
   const [walkProfile, setWalkProfile] = useState<WalkProfile>(WALK_PROFILE_DEFAULT);
   // 【実験的】直線距離モデル/道路網距離モデルの切り替え（詳細はDistanceModelのコメント参照）。
   const [distanceModel, setDistanceModel] = useState<DistanceModel>(DISTANCE_MODEL_DEFAULT);
-  // "network"に初めて切り替えたときに44.5MBのJSONを遅延読み込みする。読み込み中はtrueにして
+  // "network"に初めて切り替えたときに大容量JSONを遅延読み込みする。読み込み中はtrueにして
   // Legendのラジオボタンを一時的に操作不能にし、多重フェッチを防ぐ。
   const [loadingNetworkScores, setLoadingNetworkScores] = useState(false);
   // 画面中央のごく一部に表示するコンパクトなローディング状態（道路網距離や高齢者プロファイル切り替え時用）
@@ -1375,7 +1139,6 @@ export default function PlateauViewer() {
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
   const scheduleDemandTransitRecomputeRef = useRef<(() => void) | null>(null);
   const scheduleDemandTransitAnalysisRef = useRef<((delayMs?: number) => void) | null>(null);
-  const clearDemandTransitAnalysisRef = useRef<(() => void) | null>(null);
   // プロファイル切り替えのonChangeから呼べるようにするための橋渡し。walkProfileRef.currentを
   // 同期的に更新してからbuildingScoreCacheを無効化・再計算するため、上のuseEffect経由の
   // 非同期な同期だと間に合わない（イベントハンドラ内でsetWalkProfileした直後にこの関数を
@@ -1400,6 +1163,7 @@ export default function PlateauViewer() {
     if (!containerRef.current || viewerRef.current) return;
 
     let cancelled = false;
+    let disposeRuntime = () => {};
 
     async function init() {
       let terrainProvider: Cesium.TerrainProvider;
@@ -1508,11 +1272,13 @@ export default function PlateauViewer() {
         );
       }
 
-      // 藤沢市公式の交通空白地判定（駅600m圏）に使う鉄道駅データを読み込む。
+      // 市の距離閾値を参考にした推計に使う周辺交通施設データを読み込む。
       let trainStationList: TrainStation[] = [];
       try {
-        const res = await fetch(TRAIN_STATIONS_JSON_URL);
-        const data: { stations: TrainStation[] } = await res.json();
+        const res = await fetch("/data/analysis-facilities.json");
+        if (!res.ok) throw new Error("交通施設データの取得に失敗しました");
+        const data: { stations: TrainStation[]; busStops: BusStop[] } = await res.json();
+        majorOperatorStopList = data.busStops.filter(isMajorOperatorStop);
         if (cancelled) return;
         trainStationList = data.stations;
       } catch (err) {
@@ -1632,31 +1398,22 @@ export default function PlateauViewer() {
         console.warn("ハローサイクリングのステーションデータの読み込みに失敗しました。ピン表示なしで継続します。", err);
       }
 
-      // 住宅系建物ごとに「最寄りバス停・最寄り駅までの傾斜込み実効距離」を計算し、藤沢市公式の
-      // 交通空白地判定（駅600m or バス300mのOR）で3D Tilesのフィーチャーを直接色分けする。
+      // 住宅系建物ごとに「最寄りバス停・最寄り駅までの傾斜込み実効距離」を計算し、市の距離基準を参考にした
+      // 距離閾値を参考にした独自推計（駅600m or バス300mのOR）で3D Tilesのフィーチャーを直接色分けする。
       // buildingScoreCache は建物ID(_x,_yから作る代替IDを含む)をキーに永続化し、タイルが
       // アンロード→再ロードされて新しいCesium3DTileFeatureインスタンスになった場合でも
       // 地形サンプリングをやり直さずに再着色できるようにする。featureScoreMapは
       // クリック時に「今画面にある生きたfeatureオブジェクト」からスコア情報を引くためのWeakMap。
       type CachedScore = { color: Cesium.Color; info: BuildingScoreInfo };
       const buildingScoreCache = new Map<string, CachedScore>();
-      const featureScoreMap = new WeakMap<Cesium.Cesium3DTileFeature, BuildingScoreInfo>();
+      let featureScoreMap = new WeakMap<Cesium.Cesium3DTileFeature, BuildingScoreInfo>();
       // 【実験的】道路網距離モデル用の事前計算データ（scripts/road-network/03_compute_scores.py
       // の出力）。"network"に初めて切り替えたときにapplyDistanceModelが遅延フェッチしてここへ
       // 格納する。buildingIdをキーに直接引けるので、該当する建物は地形サンプリング不要で
       // 即座に色を決められる。
       let networkScoreMap: Map<string, BuildingNetworkScoreRow> | null = null;
-      // 勾配プロファイル（一般/高齢者）切り替え用の「世代」カウンタ。applyWalkProfileが
-      // 呼ばれるたびに+1し、buildingScoreCacheを空にする。tileScannedGenerationは
-      // 「このタイルを最後に処理したときの世代」をタイルごとに記録するWeakMapで、
-      // processTileIfNeeded（tileLoad/tileVisible両方から呼ばれる）が「このタイルは
-      // 現在の世代でまだ処理していない」ときだけ実際のprocessTileを呼ぶためのガードに使う。
-      // Cesium3DTilesetには「現在ロード済みの全タイルを走査する」ような公開APIが無いため、
-      // 代わりにtileVisible（画面に映るたびに毎フレーム発火するイベント）に安価なチェックだけ
-      // 常時ぶら下げておき、世代が古いタイルが画面に映った瞬間に自己修復的に再計算させる方式にした
-      // （オフスクリーンのタイルも、後で画面に戻ってきたときに正しく新しい世代で再計算される）。
-      let scoreGeneration = 0;
-      const tileScannedGeneration = new WeakMap<Cesium.Cesium3DTile, number>();
+      // 成功した世代だけ処理済みとし、失敗はバックオフ後にtileVisibleから再試行する。
+      const tileWork = new TileWorkGate<Cesium.Cesium3DTile>();
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
@@ -1670,6 +1427,7 @@ export default function PlateauViewer() {
         centroidLat: number;
         centroidLng: number;
         members: DemandTransitMember[];
+        estimatedAfter?: number;
       };
       let demandTransitCandidates: DemandTransitCandidate[] = [];
       // 比較ボタンを押した後は、表示範囲に依存するbuildingScoreCacheではなく藤沢市北部全域の
@@ -1680,11 +1438,13 @@ export default function PlateauViewer() {
       // クリックのたびにインクリメントし、非同期の「新設した場合の推定実効距離」計算が
       // 完了した時点で最新のクリックと一致するかを確認する（古いリクエストの結果で
       // ポップアップを上書きしないようにするため）。
-      let demandTransitRequestId = 0;
+
       const demandTransitIconUrl = createSquareIconDataUrl(DEMAND_TRANSIT_COLOR);
 
       function recomputeDemandTransitCandidates() {
         if (cancelled) return;
+        ++popupRequestRef.current;
+        if (candidatePopupRef.current) { setPopup(null); candidatePopupRef.current = false; }
         const gapBuildings: DemandTransitMember[] = demandTransitAnalysisMembers
           ? demandTransitAnalysisMembers
           : [];
@@ -1740,7 +1500,7 @@ export default function PlateauViewer() {
           clusters = kMeans(projected, demandTransitClusterCountRef.current);
         }
 
-        for (const cluster of clusters) {
+        for (const [clusterIndex, cluster] of clusters.entries()) {
           const [centroidLat, centroidLng] = unprojectFromLocalMeters(
             cluster.centroid[0],
             cluster.centroid[1],
@@ -1748,6 +1508,7 @@ export default function PlateauViewer() {
             refLng
           );
           const members = cluster.indices.map((i) => gapBuildings[i]);
+          if (!members.length) continue;
           const entity = viewer.entities.add({
             position: Cesium.Cartesian3.fromDegrees(centroidLng, centroidLat),
             properties: { isDemandTransitCandidate: true },
@@ -1764,7 +1525,10 @@ export default function PlateauViewer() {
               disableDepthTestDistance: Number.POSITIVE_INFINITY,
             },
           });
-          demandTransitCandidates.push({ entity, centroidLat, centroidLng, members });
+          const distances = demandTransitAnalysisSites?.[clusterIndex]?.distances;
+          const estimatedAfter = distances && members.length ? cluster.indices.reduce((sum,i) =>
+            sum + Math.min(gapBuildings[i].busEffectiveDistanceMeters, distances[i]),0)/members.length : undefined;
+          demandTransitCandidates.push({ entity, centroidLat, centroidLng, members, estimatedAfter });
         }
       }
 
@@ -1778,139 +1542,84 @@ export default function PlateauViewer() {
       // スライダー操作（Reactのイベントハンドラ、このクロージャの外側）から再計算を
       // トリガーできるようにrefへ登録しておく。
       scheduleDemandTransitRecomputeRef.current = scheduleDemandTransitRecompute;
-      clearDemandTransitAnalysisRef.current = () => {
-        demandTransitAnalysisMembers = null;
-        demandTransitAnalysisSites = null;
-        setDemandTransitPlanAnalysis(null);
-        scheduleDemandTransitRecompute();
-      };
-
       // 比較用の全域データを必要な時だけ読む。78,542棟ぶんの事前計算ファイルは42MBあるため、
       // 通常の地図表示・建物色分けだけを見る利用者にはダウンロードさせない。
+      let networkScoresPromise: Promise<Map<string, BuildingNetworkScoreRow> | null> | null = null;
       async function ensureNetworkScoreMap(): Promise<Map<string, BuildingNetworkScoreRow> | null> {
         if (networkScoreMap) return networkScoreMap;
+        if (networkScoresPromise) return networkScoresPromise;
         setLoadingNetworkScores(true);
-        try {
-          const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
-          if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
-          const rows: BuildingNetworkScoreRow[] = await res.json();
-          if (cancelled) return null;
-          networkScoreMap = new Map(rows.map((row) => [row.buildingId, row]));
-          return networkScoreMap;
-        } catch (err) {
-          console.warn("全域のデマンド交通比較データの読み込みに失敗しました", err);
-          return null;
-        } finally {
-          if (!cancelled) setLoadingNetworkScores(false);
-        }
+        networkScoresPromise = (async () => {
+          try {
+            const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
+            if (!res.ok) throw new Error(`network scores: ${res.status}`);
+            const rows: BuildingNetworkScoreRow[] = await res.json();
+            if (cancelled) return null;
+            networkScoreMap = new Map(rows.map(row => [row.buildingId, row]));
+            return networkScoreMap;
+          } catch (error) {
+            console.warn('道路網データの取得に失敗しました', error);
+            return null;
+          } finally {
+            networkScoresPromise = null;
+            if (!cancelled) setLoadingNetworkScores(false);
+          }
+        })();
+        return networkScoresPromise;
       }
 
-      // 1〜10か所の各案を藤沢市北部の住宅系建物全件で一括比較する。全案について地形サンプルを
-      // 取り直すと数十万〜数百万点の問い合わせになり操作待ちが長くなるため、新しい乗り場への
-      // 直線距離に既存経路から得た傾斜負荷倍率を掛けた「概算実効距離」を使う。候補ピンを個別
-      // クリックしたときの表示は、従来どおりsampleTerrainMostDetailedによる詳細計算のまま。
+      // 全域比較はWorkerで実行。道路網モデルは選択候補を同じ道路網で再評価する。
       let demandTransitAnalysisTimer: number | null = null;
       let demandTransitAnalysisRunId = 0;
-      async function runDemandTransitAnalysis(runId: number) {
+      let analysisWorker: Worker | null = null;
+      let analysisRequested = false;
+      function runDemandTransitAnalysis(runId: number) {
         if (cancelled || runId !== demandTransitAnalysisRunId) return;
-        setIsDemandTransitAnalysisRunning(true);
-        // すでに全域データを読み込んでいる場合にも、ボタンの「比較中…」表示を描画してから
-        // 約8万棟の集計を始める。
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-        const allScores = await ensureNetworkScoreMap();
-        if (cancelled || runId !== demandTransitAnalysisRunId || !allScores) {
-          if (!cancelled && runId === demandTransitAnalysisRunId) {
-            demandTransitAnalysisMembers = null;
-            demandTransitAnalysisSites = null;
-            setDemandTransitPlanAnalysis(null);
-            recomputeDemandTransitCandidates();
-            setIsDemandTransitAnalysisRunning(false);
-          }
-          return;
-        }
-
-        const profile = walkProfileRef.current;
-        // 比較グラフは地図の公式判定とは独立した感度分析。ここでだけ、実効距離に対する
-        // バス300m・駅600mの許容倍率を適用する。道路網モデル用の地図側緩和倍率は混ぜず、
-        // 「この倍率で比較した」と説明できる一つの条件にする。
+        analysisWorker?.terminate();
+        setAnalysisError(null);
         const thresholdMultiplier = demandTransitAnalysisThresholdMultiplierRef.current;
-        const targets: DemandTransitMember[] = [];
-        for (const row of allScores.values()) {
-          const networkBusEffectiveDistanceMeters =
-            profile === "general" ? row.busEffectiveDistanceM_general : row.busEffectiveDistanceM_elderly;
-          const networkStationEffectiveDistanceMeters =
-            profile === "general" ? row.stationEffectiveDistanceM_general : row.stationEffectiveDistanceM_elderly;
-          let busStraightDistanceMeters = row.busNetworkDistanceM;
-          let busEffectiveDistanceMeters = networkBusEffectiveDistanceMeters;
-          let stationEffectiveDistanceMeters = networkStationEffectiveDistanceMeters;
-
-          // 既定の直線距離モデルでは、全域データに含まれる道路網の勾配負荷倍率だけを使い、
-          // 建物〜最寄り停留所/駅の直線距離を全件で再計算する。これにより、地図の既定モデルと
-          // 同じ「直線ベース＋傾斜負荷」の考え方を、表示範囲に依存せず全域へ適用できる。
-          if (distanceModelRef.current === "straight") {
-            let nearestBusDistance = Infinity;
-            for (const stop of majorOperatorStopList) {
-              nearestBusDistance = Math.min(nearestBusDistance, haversineMeters(row.lat, row.lng, stop.lat, stop.lng));
-            }
-            let nearestStationDistance = Infinity;
-            for (const station of trainStationList) {
-              nearestStationDistance = Math.min(
-                nearestStationDistance,
-                haversineMeters(row.lat, row.lng, station.lat, station.lng)
-              );
-            }
-            const busSlopeLoad = Math.min(
-              3,
-              Math.max(1, networkBusEffectiveDistanceMeters / Math.max(row.busNetworkDistanceM, 1))
-            );
-            const stationSlopeLoad = Math.min(
-              3,
-              Math.max(1, networkStationEffectiveDistanceMeters / Math.max(row.stationNetworkDistanceM, 1))
-            );
-            busStraightDistanceMeters = nearestBusDistance;
-            busEffectiveDistanceMeters = nearestBusDistance * busSlopeLoad;
-            stationEffectiveDistanceMeters = nearestStationDistance * stationSlopeLoad;
-          }
-          const coverageRatio = Math.min(
-            busEffectiveDistanceMeters / (BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier),
-            stationEffectiveDistanceMeters / (STATION_COVERAGE_THRESHOLD_METERS * thresholdMultiplier)
-          );
-          if (coverageRatio > DEMAND_TRANSIT_GAP_RATIO_THRESHOLD) {
-            targets.push({
-              lat: row.lat,
-              lng: row.lng,
-              busStraightDistanceMeters,
-              busEffectiveDistanceMeters,
-              stationEffectiveDistanceMeters,
-              coverageRatio,
-            });
-          }
-        }
-        if (targets.length < DEMAND_TRANSIT_MIN_BUILDINGS) {
+        const worker = new Worker(new URL('./workers/transit-analysis.worker.ts', import.meta.url));
+        analysisWorker = worker;
+        const fail = (message: string) => {
+          if (cancelled || runId !== demandTransitAnalysisRunId) return;
+          worker.terminate();
+          analysisWorker = null;
+          setAnalysisError(message);
+          setIsDemandTransitAnalysisRunning(false);
+          setDemandTransitPlanAnalysis(null);
           demandTransitAnalysisMembers = null;
           demandTransitAnalysisSites = null;
-          setDemandTransitPlanAnalysis(null);
+          scheduleDemandTransitRecompute();
+        };
+        worker.onerror = () => fail('比較処理に失敗しました。「比較グラフを表示」から再試行できます。');
+        worker.onmessage = (event: MessageEvent<AnalysisResponse>) => {
+          if (cancelled || runId !== demandTransitAnalysisRunId) return;
+          const data = event.data;
+          if ('error' in data) { fail(data.error); return; }
+          worker.terminate();
+          analysisWorker = null;
+          demandTransitAnalysisMembers = data.members;
+          demandTransitAnalysisSites = data.sites;
+          if (!data.results.length) {
+            setAnalysisError('この条件では比較対象の交通空白地がありません。');
+            setDemandTransitPlanAnalysis(null);
+          } else {
+            setDemandTransitPlanAnalysis({targetBuildingCount:data.members.length,
+              scopeLabel:`藤沢市北部全域（住宅系建物${data.total.toLocaleString()}棟）`,
+              methodLabel:data.methodLabel, thresholdMultiplier, results:data.results});
+          }
           recomputeDemandTransitCandidates();
           setIsDemandTransitAnalysisRunning(false);
-          return;
-        }
-
-        const { sites, results } = buildGreedyDemandTransitPlan(targets, 10, thresholdMultiplier);
-
-        if (cancelled || runId !== demandTransitAnalysisRunId) return;
-        setDemandTransitPlanAnalysis({
-          targetBuildingCount: targets.length,
-          scopeLabel: "藤沢市北部全域（住宅系建物78,542棟）",
-          thresholdMultiplier,
-          results,
-        });
-        demandTransitAnalysisMembers = targets;
-        demandTransitAnalysisSites = sites;
-        // スライダーで現在選ばれている件数の候補ピンを、全域の同じ対象建物から再生成する。
-        recomputeDemandTransitCandidates();
-        setIsDemandTransitAnalysisRunning(false);
+        };
+        worker.postMessage({profile:walkProfileRef.current,model:distanceModelRef.current,
+          thresholdMultiplier,stops:majorOperatorStopList,stations:trainStationList});
       }
       function scheduleDemandTransitAnalysis(delayMs = 450) {
+        analysisRequested = true;
+        analysisWorker?.terminate();
+        analysisWorker = null;
+        ++popupRequestRef.current;
+        setPopup(null);
         demandTransitAnalysisRunId++;
         const scheduledRunId = demandTransitAnalysisRunId;
         if (demandTransitAnalysisTimer) window.clearTimeout(demandTransitAnalysisTimer);
@@ -1921,14 +1630,16 @@ export default function PlateauViewer() {
         }, delayMs);
       }
       scheduleDemandTransitAnalysisRef.current = scheduleDemandTransitAnalysis;
-      // 起動時は44.5MBの読み込みと数千万回の計算を走らせず、ユーザーが「比較グラフを表示」を
+      // 起動時は全域データの読み込みと数千万回の計算を走らせず、ユーザーが「比較グラフを表示」を
       // 押したときに初めて遅延実行する（起動負荷と地名ラベルの脱落を防止するため）。
 
-      async function processTile(tile: Cesium.Cesium3DTile) {
-        if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0 || trainStationList.length === 0) return;
+      async function processTile(tile: Cesium.Cesium3DTile, generation: number): Promise<boolean> {
+        if (tokaidoLinePoints.length === 0 || majorOperatorStopList.length === 0 || trainStationList.length === 0) return false;
+        if (cancelled) return false;
+        if (distanceModelRef.current === 'network' && !networkScoreMap) return false;
         const content = tile.content;
-        if (!content || content.featuresLength === 0) return;
-        if (buildingScoreCache.size >= MAX_SCORED_BUILDINGS) return;
+        const isCurrent = () => !cancelled && generation === tileWork.generation && tile.content === content;
+        if (!content || content.featuresLength === 0) return true;
 
         type Candidate = {
           feature: Cesium.Cesium3DTileFeature;
@@ -1959,6 +1670,8 @@ export default function PlateauViewer() {
             featureScoreMap.set(feature, cached.info);
             continue;
           }
+          feature.color = Cesium.Color.WHITE;
+          featureScoreMap.delete(feature);
           if (buildingScoreCache.size + candidates.length >= MAX_SCORED_BUILDINGS) continue;
 
           const totalFloorArea = feature.getProperty(
@@ -1967,7 +1680,7 @@ export default function PlateauViewer() {
           candidates.push({ feature, buildingId, lng, lat, usage, totalFloorArea: totalFloorArea ?? null });
         }
 
-        if (candidates.length === 0) return;
+        if (candidates.length === 0) return true;
 
         const profile = WALK_PROFILES[walkProfileRef.current];
 
@@ -1975,6 +1688,7 @@ export default function PlateauViewer() {
         // ヘルパー。直線距離モデル（ライブ計算）・道路網距離モデル（事前計算データ）の
         // どちらの経路からも同じ形で呼べるようにしている。
         function recordScore(feature: Cesium.Cesium3DTileFeature, buildingId: string, info: BuildingScoreInfo) {
+          if (!isCurrent()) return;
           const color = colorForCoverageRatio(info.coverageRatio);
           feature.color = color;
           buildingScoreCache.set(buildingId, { color, info });
@@ -1983,14 +1697,13 @@ export default function PlateauViewer() {
 
         // 【実験的】道路網距離モデルが選択されていて事前計算データが読み込み済みなら、該当する
         // 建物はそちらの数値をそのまま使う（地形サンプリング不要）。事前計算データに無い建物
-        // （オフライン抽出と実行タイミングがズレて生じた差分等）は直線距離モデルにフォールバックする。
+        // （オフライン抽出との差分等）は未評価のまま残し、距離モデルを混在させない。
         let liveCandidates = candidates;
         if (distanceModelRef.current === "network" && networkScoreMap) {
           liveCandidates = [];
           for (const c of candidates) {
             const row = networkScoreMap.get(c.buildingId);
             if (!row) {
-              liveCandidates.push(c);
               continue;
             }
             const busEff =
@@ -2011,14 +1724,14 @@ export default function PlateauViewer() {
               usage: c.usage,
               lat: c.lat,
               lng: c.lng,
-              nearestStopName: row.nearestStopName,
+              nearestStopName: row[`nearestStopName_${walkProfileRef.current}`],
               // 道路網距離モデルには「直線距離」の概念が無いため、勾配加味前の道路網距離を代用する
               // （現状のUIはこの値を表示していないため実用上の影響はない）。
-              busStraightDistanceMeters: row.busNetworkDistanceM,
+              busStraightDistanceMeters: walkProfileRef.current === "general" ? row.busNetworkDistanceM : row.busNetworkDistanceM_elderly,
               busEffectiveDistanceMeters: busEff,
               busWalkMinutes: busEff / profile.walkSpeedMPerMin,
-              nearestStationName: row.nearestStationName,
-              stationStraightDistanceMeters: row.stationNetworkDistanceM,
+              nearestStationName: row[`nearestStationName_${walkProfileRef.current}`],
+              stationStraightDistanceMeters: walkProfileRef.current === "general" ? row.stationNetworkDistanceM : row.stationNetworkDistanceM_elderly,
               stationEffectiveDistanceMeters: stationEff,
               stationWalkMinutes: stationEff / profile.walkSpeedMPerMin,
               coverageRatio,
@@ -2032,7 +1745,7 @@ export default function PlateauViewer() {
 
         if (liveCandidates.length === 0) {
           scheduleDemandTransitRecompute();
-          return;
+          return true;
         }
 
         // 各建物の最寄りバス停・最寄り駅を探す。バス停は主要事業者のみを対象にする
@@ -2090,9 +1803,9 @@ export default function PlateauViewer() {
             "傾斜計算用の地形サンプリングに失敗しました。このタイルの建物群はスコア計算をスキップします。",
             err
           );
-          return;
+          return false;
         }
-        if (cancelled) return;
+        if (!isCurrent()) return false;
 
         const n = withNearest.length;
         withNearest.forEach((c, idx) => {
@@ -2130,119 +1843,73 @@ export default function PlateauViewer() {
         });
 
         scheduleDemandTransitRecompute();
+        return true;
       }
 
-      // tileLoad（新規タイルの読み込み完了時）・tileVisible（タイルが画面に映るたびに毎フレーム
-      // 発火）の両方からこのラッパー経由でprocessTileを呼ぶ。tileScannedGenerationに
-      // 記録した「最後に処理した世代」が現在のscoreGenerationと一致していれば何もしない
-      // （WeakMap.get + 比較だけの安価なチェックなので、tileVisibleの高頻度発火でも問題にならない）。
+      // 読み込み・表示の両イベントで、未処理または再試行時刻を迎えたタイルだけ評価。
       function processTileIfNeeded(tile: Cesium.Cesium3DTile) {
-        if (tileScannedGeneration.get(tile) === scoreGeneration) return;
-        tileScannedGeneration.set(tile, scoreGeneration);
-        void processTile(tile);
+        if (cancelled) return;
+        void tileWork.run(tile, generation => processTile(tile, generation));
       }
-      tileset?.tileLoad.addEventListener(processTileIfNeeded);
-      tileset?.tileVisible.addEventListener(processTileIfNeeded);
+      const removeLoad = tileset?.tileLoad.addEventListener(processTileIfNeeded);
+      const removeVisible = tileset?.tileVisible.addEventListener(processTileIfNeeded);
+      const removeUnload = tileset?.tileUnload.addEventListener(tile => tileWork.forget(tile));
 
-      // 勾配プロファイル（一般/高齢者）が切り替わったときに呼ぶ。実効距離・coverageRatioは
-      // プロファイルに依存するため、buildingScoreCacheに入っている既存の計算結果はすべて古くなる。
-      // scoreGenerationを進めてキャッシュを空にするだけで、実際の再計算はprocessTileIfNeededが
-      // tileVisibleイベント経由で自己修復的に行う（画面内のタイルは次のフレームで、画面外の
-      // タイルも後で映ったときに正しく再計算される）。
+      function invalidateScores() {
+        const generation = tileWork.invalidate();
+        buildingScoreCache.clear();
+        featureScoreMap = new WeakMap();
+        ++popupRequestRef.current;
+        setPopup(null);
+        demandTransitAnalysisMembers = null;
+        demandTransitAnalysisSites = null;
+        scheduleDemandTransitRecompute();
+        if (analysisRequested) scheduleDemandTransitAnalysis();
+        return generation;
+      }
       async function applyWalkProfile(profile: WalkProfile) {
         walkProfileRef.current = profile;
-        setCenterLoading({
-          title: `${WALK_PROFILES[profile].label}を反映中…`,
-          subtitle: "建物の坂道負荷・歩行速度を再計算しています",
-        });
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-        scoreGeneration++;
-        buildingScoreCache.clear();
-        scheduleDemandTransitRecompute();
-
-        // 画面内のタイルが再評価・再着色される時間を少し確保してスムーズに解除する
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
-        if (!cancelled) {
-          setCenterLoading(null);
-        }
+        const generation = invalidateScores();
+        await new Promise<void>(resolve => window.setTimeout(resolve, 800));
+        if (!cancelled && generation === tileWork.generation) setCenterLoading(null);
       }
-      applyWalkProfileRef.current = (profile) => {
-        void applyWalkProfile(profile);
-      };
-
-      // 【実験的】直線距離モデル/道路網距離モデルの切り替え。"network"に初めて切り替えたときだけ
-      // 44.5MBのbuilding-network-scores.jsonを遅延フェッチする（デフォルトの直線距離モデルしか
-      // 使わないユーザーに無駄な大容量ダウンロードをさせないため）。取得後はapplyWalkProfileと
-      // 同じ要領でscoreGenerationを進めてキャッシュを無効化し、tileVisible経由の自己修復に任せる。
+      applyWalkProfileRef.current = profile => { void applyWalkProfile(profile); };
       async function applyDistanceModel(model: DistanceModel) {
         distanceModelRef.current = model;
-        if (model === "network") {
-          setLoadingNetworkScores(true);
-          setCenterLoading({
-            title: "道路網距離を反映中…",
-            subtitle: networkScoreMap
-              ? "建物の道路ネットワーク距離を再評価しています"
-              : "道路網距離データ（44.5MB）を読み込んでいます",
-          });
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
-          if (!networkScoreMap) {
-            try {
-              const res = await fetch(BUILDING_NETWORK_SCORES_JSON_URL);
-              if (!res.ok) throw new Error(`building-network-scores.json returned ${res.status}`);
-              const rows: BuildingNetworkScoreRow[] = await res.json();
-              if (cancelled) return;
-              networkScoreMap = new Map(rows.map((r) => [r.buildingId, r]));
-            } catch (err) {
-              console.warn(
-                "道路網距離モデルのデータ読み込みに失敗しました。直線距離モデルのままにします。",
-                err
-              );
-              distanceModelRef.current = "straight";
-              setDistanceModel("straight");
-              setLoadingNetworkScores(false);
-              setCenterLoading(null);
-              return;
-            }
+        const generation = invalidateScores();
+        if (model === 'network') {
+          const scores = await ensureNetworkScoreMap();
+          if (cancelled || distanceModelRef.current !== model) return;
+          if (!scores) {
+            distanceModelRef.current = 'straight';
+            setDistanceModel('straight');
+            invalidateScores();
+            setCenterLoading(null);
+            setAnalysisError('道路網データを取得できなかったため、直線距離表示に戻しました。');
           }
-        } else {
-          setCenterLoading({
-            title: "直線距離モデルを反映中…",
-            subtitle: "建物の直線距離を再評価しています",
-          });
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
         }
-        scoreGeneration++;
-        buildingScoreCache.clear();
-        scheduleDemandTransitRecompute();
-
-        // 画面内のタイルが再評価・再着色される時間を少し確保してスムーズに解除する
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
-        if (!cancelled) {
-          setLoadingNetworkScores(false);
-          setCenterLoading(null);
-        }
+        if (!cancelled && generation === tileWork.generation && distanceModelRef.current === model) setCenterLoading(null);
       }
-      applyDistanceModelRef.current = (model) => {
-        void applyDistanceModel(model);
-      };
-
-      // 【実験的】道路網距離モデルの閾値倍率が変わったときに呼ぶ。事前計算データの再取得は
-      // 不要（rowの生の実効距離はそのまま使い、coverageRatioだけその場で計算し直すため）。
-      // applyWalkProfileと同じ要領でscoreGenerationを進めてキャッシュを無効化し、tileVisible
-      // 経由の自己修復に任せる。直線距離モデル選択中に呼ばれても実害は無い（無効化されるだけで、
-      // 再計算時はprocessTileの直線距離ブランチが素通りする）。
-      function applyNetworkThresholdMultiplier(multiplier: number) {
+      applyDistanceModelRef.current = model => { void applyDistanceModel(model); };
+      applyNetworkThresholdMultiplierRef.current = multiplier => {
         networkThresholdMultiplierRef.current = multiplier;
-        scoreGeneration++;
-        buildingScoreCache.clear();
-        scheduleDemandTransitRecompute();
-      }
-      applyNetworkThresholdMultiplierRef.current = applyNetworkThresholdMultiplier;
+        invalidateScores();
+      };
+      disposeRuntime = () => {
+        removeLoad?.(); removeVisible?.(); removeUnload?.();
+        clickHandler.destroy();
+        analysisWorker?.terminate();
+        if (demandTransitRecomputeTimer) clearTimeout(demandTransitRecomputeTimer);
+        if (demandTransitAnalysisTimer) clearTimeout(demandTransitAnalysisTimer);
+        tileWork.invalidate();
+      };
 
       // Cesium標準のクリック選択（selectionIndicator/infoBox）は無効化しているため、
       // バス停・建物クリック時の情報表示は自前のInfoPopupで行う。
       const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
       clickHandler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+        ++popupRequestRef.current;
+        candidatePopupRef.current = false;
         const picked = viewer.scene.pick(movement.position);
         const entity = picked?.id;
         if (entity instanceof Cesium.Entity && entity.properties?.isBusStop?.getValue()) {
@@ -2258,7 +1925,8 @@ export default function PlateauViewer() {
           if (!candidate) {
             setPopup(null);
           } else {
-            const requestId = ++demandTransitRequestId;
+            candidatePopupRef.current = true;
+            const requestId = ++popupRequestRef.current;
             const avgCurrentDistance =
               candidate.members.reduce((sum, m) => sum + m.busEffectiveDistanceMeters, 0) / candidate.members.length;
 
@@ -2284,12 +1952,12 @@ export default function PlateauViewer() {
                 );
                 if (!res.ok) throw new Error(`reverse-geocode API returned ${res.status}`);
                 const data: { areaName: string | null } = await res.json();
-                if (cancelled || requestId !== demandTransitRequestId) return;
+                if (cancelled || requestId !== popupRequestRef.current) return;
                 areaNameText = data.areaName ?? "不明";
                 setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
               } catch (err) {
                 console.warn("デマンド交通乗り場候補の地区名取得に失敗しました", err);
-                if (cancelled || requestId !== demandTransitRequestId) return;
+                if (cancelled || requestId !== popupRequestRef.current) return;
                 areaNameText = "取得できませんでした";
                 setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
               }
@@ -2299,6 +1967,16 @@ export default function PlateauViewer() {
             // 目的地だけ「クリックされた候補地点」に差し替えて呼び出す）。
             void (async () => {
               try {
+                if (candidate.estimatedAfter !== undefined) {
+                  newDistanceLine = `新設後の平均実効距離（比較と同じ計算）: 約${Math.round(candidate.estimatedAfter)}m`;
+                  if (!cancelled && requestId === popupRequestRef.current) setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
+                  return;
+                }
+                if (distanceModelRef.current === "network") {
+                  newDistanceLine = "道路網での効果は「比較グラフを表示」で計算してください";
+                  if (!cancelled && requestId === popupRequestRef.current) setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
+                  return;
+                }
                 const results = await computeEffectiveDistances(
                   terrainProvider,
                   candidate.members.map((m) => ({
@@ -2310,14 +1988,14 @@ export default function PlateauViewer() {
                   WALK_PROFILES[walkProfileRef.current].slopePenaltyFactor
                 );
                 // 計算中に別の候補がクリックされていたら、この結果は捨てて何もしない。
-                if (cancelled || requestId !== demandTransitRequestId) return;
+                if (cancelled || requestId !== popupRequestRef.current) return;
                 const avgNewDistance =
-                  results.reduce((sum, r) => sum + r.effectiveDistanceMeters, 0) / results.length;
+                  results.reduce((sum, r, i) => sum + Math.min(candidate.members[i].busEffectiveDistanceMeters, r.effectiveDistanceMeters), 0) / results.length;
                 newDistanceLine = `新設した場合の推定実効距離: 約${Math.round(avgNewDistance)}m`;
                 setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
               } catch (err) {
                 console.warn("デマンド交通乗り場候補の再計算に失敗しました", err);
-                if (cancelled || requestId !== demandTransitRequestId) return;
+                if (cancelled || requestId !== popupRequestRef.current) return;
                 newDistanceLine = "新設した場合の推定実効距離: 計算に失敗しました";
                 setPopup({ title: "デマンド交通 乗り場候補", lines: buildLines() });
               }
@@ -2384,9 +2062,9 @@ export default function PlateauViewer() {
 
     return () => {
       cancelled = true;
+      disposeRuntime();
       scheduleDemandTransitRecomputeRef.current = null;
       scheduleDemandTransitAnalysisRef.current = null;
-      clearDemandTransitAnalysisRef.current = null;
       applyWalkProfileRef.current = null;
       applyDistanceModelRef.current = null;
       applyNetworkThresholdMultiplierRef.current = null;
@@ -2409,6 +2087,7 @@ export default function PlateauViewer() {
         networkThresholdMultiplier={networkThresholdMultiplier}
         showExperimentalDistanceModel={showExperimentalDistanceModel}
         onClusterCountChange={(value) => {
+          demandTransitClusterCountRef.current = value;
           setDemandTransitClusterCount(value);
           scheduleDemandTransitRecomputeRef.current?.();
         }}
@@ -2436,9 +2115,6 @@ export default function PlateauViewer() {
             title: value === "network" ? "道路網距離を反映中…" : "直線距離モデルを反映中…",
             subtitle: "建物の距離基準を切り替えています",
           });
-          if (value === "network") {
-            setLoadingNetworkScores(true);
-          }
           applyDistanceModelRef.current?.(value);
         }}
         onNetworkThresholdMultiplierChange={(value) => {
@@ -2455,6 +2131,7 @@ export default function PlateauViewer() {
           }
         }}
       />
+      {analysisError && <div role="alert" style={{position:'absolute',right:12,top:12,zIndex:20,maxWidth:360,padding:12,background:'#7f1d1d',color:'white'}}>{analysisError}<button onClick={()=>setAnalysisError(null)} aria-label="通知を閉じる">×</button></div>}
       <UncoloredBuildingsNote />
       <DemandTransitRecommendationPanel
         analysis={demandTransitPlanAnalysis}
@@ -2464,7 +2141,7 @@ export default function PlateauViewer() {
         isVisible={isDemandTransitPanelVisible}
         onClose={() => setIsDemandTransitPanelVisible(false)}
       />
-      {popup && <InfoPopup info={popup} onClose={() => setPopup(null)} />}
+      {popup && <InfoPopup info={popup} onClose={() => { ++popupRequestRef.current; candidatePopupRef.current = false; setPopup(null); }} />}
       <CenterLoadingIndicator loadingState={centerLoading} />
     </div>
   );

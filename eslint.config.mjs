@@ -9,6 +9,8 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    "public/cesium/**",
+    "scripts/road-network/venv/**",
     "out/**",
     "build/**",
     "next-env.d.ts",
