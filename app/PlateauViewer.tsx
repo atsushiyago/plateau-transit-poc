@@ -988,7 +988,6 @@ function CustomStopSimulationPanel({
   summary,
   analysisThresholdMultiplier,
   onToggleAddingCustomStop,
-  onUndoLastStop,
   onClearStops,
   onRemoveStop,
   onFlyToStop,
@@ -1000,7 +999,6 @@ function CustomStopSimulationPanel({
   summary: CustomStopSimulationSummary | null;
   analysisThresholdMultiplier: number;
   onToggleAddingCustomStop: () => void;
-  onUndoLastStop: () => void;
   onClearStops: () => void;
   onRemoveStop: (id: number) => void;
   onFlyToStop: (id: number) => void;
@@ -1215,38 +1213,21 @@ function CustomStopSimulationPanel({
                   <span style={{ fontWeight: "bold", fontSize: 12, color: "#e2e8f0" }}>
                     配置した停留所一覧（{stopCount}箇所）
                   </span>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button
-                      type="button"
-                      onClick={onUndoLastStop}
-                      style={{
-                        padding: "3px 8px",
-                        fontSize: 11,
-                        borderRadius: 4,
-                        border: "1px solid rgba(255,255,255,0.3)",
-                        background: "rgba(255,255,255,0.1)",
-                        color: "#fff",
-                        cursor: "pointer",
-                      }}
-                    >
-                      1つ戻す
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onClearStops}
-                      style={{
-                        padding: "3px 8px",
-                        fontSize: 11,
-                        borderRadius: 4,
-                        border: "1px solid rgba(248,113,113,0.5)",
-                        background: "rgba(127,29,29,0.4)",
-                        color: "#fecaca",
-                        cursor: "pointer",
-                      }}
-                    >
-                      すべてクリア
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={onClearStops}
+                    style={{
+                      padding: "3px 8px",
+                      fontSize: 11,
+                      borderRadius: 4,
+                      border: "1px solid rgba(248,113,113,0.5)",
+                      background: "rgba(127,29,29,0.4)",
+                      color: "#fecaca",
+                      cursor: "pointer",
+                    }}
+                  >
+                    すべてクリア
+                  </button>
                 </div>
                 <div style={{ display: "grid", gap: 5 }}>
                   {summary?.perStopStats.map((stat) => (
@@ -3300,7 +3281,6 @@ export default function PlateauViewer() {
         customStopNewlyCoveredCount={customStopSummary?.newlyCoveredBuildings ?? 0}
         onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
         onClearCustomStops={() => {
-          setIsAddingCustomStop(false);
           clearCustomStopsRef.current?.();
         }}
       />
@@ -3313,9 +3293,8 @@ export default function PlateauViewer() {
           distanceModel === "network" ? networkThresholdMultiplier : demandTransitAnalysisThresholdMultiplier
         }
         onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
-        onUndoLastStop={() => undoLastCustomStopRef.current?.()}
         onClearStops={() => {
-          setIsAddingCustomStop(false);
+          setIsAddingCustomStop(true);
           clearCustomStopsRef.current?.();
         }}
         onRemoveStop={(id) => removeCustomStopRef.current?.(id)}
