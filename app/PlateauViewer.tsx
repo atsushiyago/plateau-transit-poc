@@ -1119,7 +1119,7 @@ function CustomStopSimulationPanel({
                 {summary && (
                   <div style={{ marginTop: 6, fontSize: 12, borderTop: "1px solid rgba(255,255,255,0.15)", paddingTop: 6 }}>
                     <div>
-                      読み込み済み空白地: {summary.totalGapBuildingsBefore.toLocaleString()}棟 →{" "}
+                      交通空白地（全体）: {summary.totalGapBuildingsBefore.toLocaleString()}棟 →{" "}
                       <b>{summary.remainingGapBuildings.toLocaleString()}棟</b>
                     </div>
                     <div>
