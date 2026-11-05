@@ -20,7 +20,10 @@ const BUILDING_TILESET_URL = `https://api.plateauview.mlit.go.jp/datacatalog/3dt
 // ベースURLは "/terrain" まで（オルソ画像のような年度サフィックスは付かない）
 const TERRAIN_URL = "https://tile.plateauview.mlit.go.jp/terrain";
 
-// 背景地図タイル: OpenStreetMap（現代的で見慣れた道路網・交差点デザイン）。APIキー不要。
+// PLATEAU-Ortho（航空写真オルソ画像。ionトークン不要）
+const ORTHO_URL = "https://tile.plateauview.mlit.go.jp/tiles/plateau-ortho-2023/{z}/{x}/{y}.png";
+
+// OpenStreetMapタイル。航空写真の上に半透明で重ね、道路網・路線名・交差点を明瞭にする。
 const OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
 // バス停データ（藤沢市北部、JR東海道線より北側のみ、337件）。
@@ -1704,12 +1707,12 @@ export default function PlateauViewer() {
 
       const viewer = new Cesium.Viewer(containerRef.current, {
         terrainProvider,
-        // 背景画像: 地元説明時に道路や交差点が明瞭に確認できるOpenStreetMapを採用
+        // Cesium ionのデフォルト背景画像を使わず、元のPLATEAU-Ortho（航空写真）をベースに使う
         baseLayer: Cesium.ImageryLayer.fromProviderAsync(
           Promise.resolve(
             new Cesium.UrlTemplateImageryProvider({
-              url: OSM_URL,
-              credit: "OpenStreetMap contributors",
+              url: ORTHO_URL,
+              credit: "Project PLATEAU (国土交通省)",
               maximumLevel: 19,
             })
           ),
@@ -1730,6 +1733,22 @@ export default function PlateauViewer() {
         selectionIndicator: false,
       });
       viewerRef.current = viewer;
+
+      // 航空写真の上にOpenStreetMapの道路網を半透明（40%）でオーバーレイ。
+      // これにより、元の落ち着いた美しいダークトーンと3D建物の水色発光を維持したまま、
+      // 道路の筋・交差点・道路名が透けて見えるようになる。
+      try {
+        const osmRoadsLayer = viewer.imageryLayers.addImageryProvider(
+          new Cesium.UrlTemplateImageryProvider({
+            url: OSM_URL,
+            credit: "OpenStreetMap contributors",
+            maximumLevel: 19,
+          })
+        );
+        osmRoadsLayer.alpha = 0.42;
+      } catch (err) {
+        console.warn("道路網オーバーレイの読み込みに失敗しました", err);
+      }
 
       let tileset: Cesium.Cesium3DTileset | undefined;
       try {
