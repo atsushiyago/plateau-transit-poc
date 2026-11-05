@@ -1,6 +1,7 @@
 "use client";
 
-import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite } from "./lib/transit-analysis";
+import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, evaluateCustomStopsSimulation, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite, type CustomStopSite, type CustomStopSimulationSummary, type CustomStopBuildingRecord } from "./lib/transit-analysis";
+import { NetworkRouter, type RoutingGraph } from "./lib/network-routing";
 import { TileWorkGate } from "./lib/async-generation";
 import type { AnalysisResponse } from "./workers/transit-analysis.worker";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -140,6 +141,13 @@ const COVERAGE_RANKS: { maxRatio: number; legendLabel: string; color: Cesium.Col
   { maxRatio: Infinity, legendLabel: "空白地（非常に遠い）", color: Cesium.Color.fromCssColorString("#7f1d1d") },
 ];
 
+// 任意地点に自由配置した仮設停留所によって新たにカバー圏内に入った建物のハイライト色（水色）。
+// 既存の緑（最初からカバー済み）と視覚的に区別し、「今回の停留所追加でどの建物が救われたか」が
+// 地図上で一目で分かるようにする。
+const NEWLY_COVERED_BUILDING_COLOR_HEX = "#38bdf8";
+const NEWLY_COVERED_BUILDING_COLOR = Cesium.Color.fromCssColorString(NEWLY_COVERED_BUILDING_COLOR_HEX);
+const CUSTOM_STOP_PIN_COLOR_HEX = "#0284c7";
+
 function colorForCoverageRatio(ratio: number): Cesium.Color {
   const rank = COVERAGE_RANKS.find((r) => ratio <= r.maxRatio) ?? COVERAGE_RANKS[COVERAGE_RANKS.length - 1];
   return rank.color;
@@ -182,6 +190,14 @@ type BuildingScoreInfo = {
   isCovered: boolean;
   totalFloorArea: number | null;
   walkProfileLabel: string;
+  customStopImprovement?: {
+    stopId: number;
+    stopLabel: string;
+    afterBusEffectiveDistanceMeters: number;
+    afterBusWalkMinutes: number;
+    afterCoverageRatio: number;
+    isNewlyCovered: boolean;
+  };
 };
 
 // 乗り場増設案の比較結果。候補地点を一つずつクリックしなくても、追加数ごとの
@@ -367,6 +383,57 @@ function createBicycleIconDataUrl(fillColor: string, size = 28): string {
   return canvas.toDataURL();
 }
 
+// 自由配置した仮設停留所ピン（水色系の丸＋白い番号テキスト）をcanvasで生成する。
+function createCustomStopPinIconDataUrl(
+  labelNumber: number,
+  fillColor = CUSTOM_STOP_PIN_COLOR_HEX,
+  size = 30
+): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const center = size / 2;
+  const radius = size / 2 - 3;
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `bold ${labelNumber >= 10 ? 12 : 14}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(labelNumber), center, center + 1);
+  return canvas.toDataURL();
+}
+
+// 画面上のクリック位置から地形表面（未ロード時は楕円体表面）の緯度経度を取得する。
+// viewer.scene.pickPositionは3D Tilesの建物屋根を拾ったり深度設定で空振りすることがあるため、
+// camera.getPickRay + globe.pick を優先し、フォールバックに pickEllipsoid を使う。
+function pickGroundLatLng(
+  viewer: Cesium.Viewer,
+  windowPosition: Cesium.Cartesian2
+): { lat: number; lng: number } | null {
+  const ray = viewer.camera.getPickRay(windowPosition);
+  let cartesian: Cesium.Cartesian3 | undefined;
+  if (ray) {
+    cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+  }
+  if (!cartesian) {
+    cartesian = viewer.camera.pickEllipsoid(windowPosition, viewer.scene.globe.ellipsoid);
+  }
+  if (!cartesian) return null;
+  const carto = Cesium.Cartographic.fromCartesian(cartesian);
+  return {
+    lat: Cesium.Math.toDegrees(carto.latitude),
+    lng: Cesium.Math.toDegrees(carto.longitude),
+  };
+}
+
 type PopupInfo = { title: string; lines: ReactNode[] };
 
 // Cesium標準のinfoBox/selectionIndicatorは無効化している（下記Viewer初期化オプション参照）ため、
@@ -416,6 +483,11 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
   );
 }
 
+// 将来的に自動抽出の乗り場候補ピン（紫）・全域比較グラフ・ハローサイクリング表示を
+// 復活させる場合の表示切り替えフラグ（内部ロジックはそのまま保持）。
+const SHOW_AUTO_CANDIDATE_AND_COMPARISON_UI = false;
+const SHOW_HELLO_CYCLING_UI = false;
+
 function Legend({
   clusterCount,
   analysisThresholdMultiplier,
@@ -435,6 +507,11 @@ function Legend({
   isDemandTransitAnalysisRunning,
   isDemandTransitPanelVisible,
   onShowDemandTransitPanel,
+  isAddingCustomStop,
+  customStopCount,
+  customStopNewlyCoveredCount,
+  onToggleAddingCustomStop,
+  onClearCustomStops,
 }: {
   clusterCount: number;
   analysisThresholdMultiplier: number;
@@ -454,6 +531,11 @@ function Legend({
   isDemandTransitAnalysisRunning: boolean;
   isDemandTransitPanelVisible: boolean;
   onShowDemandTransitPanel: () => void;
+  isAddingCustomStop: boolean;
+  customStopCount: number;
+  customStopNewlyCoveredCount: number;
+  onToggleAddingCustomStop: () => void;
+  onClearCustomStops: () => void;
 }) {
   // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
   // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
@@ -504,6 +586,19 @@ function Legend({
           <span>{rank.legendLabel}</span>
         </div>
       ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 14,
+            height: 14,
+            background: NEWLY_COVERED_BUILDING_COLOR_HEX,
+            border: "1px solid rgba(255,255,255,0.6)",
+            flexShrink: 0,
+          }}
+        />
+        <span>新規カバー（自由配置した停留所で解消）</span>
+      </div>
       <div style={{ marginTop: 4 }}>
         <div style={{ opacity: 0.85, marginBottom: 2 }}>勾配・歩行速度のプロファイル:</div>
         {(Object.keys(WALK_PROFILES) as WalkProfile[]).map((key) => (
@@ -637,18 +732,34 @@ function Legend({
         />
         <span>バス停（その他事業者・コミュニティバス。参考表示のみ）</span>
       </div>
+      {SHOW_AUTO_CANDIDATE_AND_COMPARISON_UI && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 12,
+              height: 12,
+              background: DEMAND_TRANSIT_COLOR,
+              border: "1px solid rgba(255,255,255,0.6)",
+              flexShrink: 0,
+            }}
+          />
+          <span>デマンド交通 乗り場候補（本PoCの提案）</span>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
         <span
           style={{
             display: "inline-block",
             width: 12,
             height: 12,
-            background: DEMAND_TRANSIT_COLOR,
-            border: "1px solid rgba(255,255,255,0.6)",
+            borderRadius: "50%",
+            background: CUSTOM_STOP_PIN_COLOR_HEX,
+            border: "1.5px solid #ffffff",
             flexShrink: 0,
           }}
         />
-        <span>デマンド交通 乗り場候補（本PoCの提案）</span>
+        <span>仮設停留所（地図クリックで自由配置）</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
         <span
@@ -664,79 +775,481 @@ function Legend({
         />
         <span>乗合タクシー等（藤沢市が既に運行中）</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-        <span
-          style={{
-            display: "inline-block",
-            width: 12,
-            height: 12,
-            borderRadius: "50%",
-            background: HELLO_CYCLING_COLOR,
-            border: "1px solid rgba(255,255,255,0.6)",
-            flexShrink: 0,
-          }}
-        />
-        <span>ハローサイクリング ステーション</span>
-      </div>
-      <div style={{ marginTop: 6 }}>
-        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-          <span>乗り場候補の数: {clusterCount}箇所</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={10}
-          step={1}
-          value={clusterCount}
-          onChange={(e) => onClusterCountChange(Number(e.target.value))}
-          style={{ width: "100%" }}
-        />
-      </div>
-      <div style={{ marginTop: 8, paddingTop: 7, borderTop: "1px solid rgba(255,255,255,0.25)" }}>
-        <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-          <span>比較分析の実効距離基準: {analysisThresholdMultiplier.toFixed(1)}倍</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={1.5}
-          step={0.1}
-          value={analysisThresholdMultiplier}
-          onChange={(e) => onAnalysisThresholdMultiplierChange(Number(e.target.value))}
-          style={{ width: "100%" }}
-        />
-        <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-          比較グラフだけに適用します。バス{Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m・駅{Math.round(STATION_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m相当で、実効距離を評価します。地図の独自推計は変わりません。
+      {SHOW_HELLO_CYCLING_UI && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 12,
+              height: 12,
+              borderRadius: "50%",
+              background: HELLO_CYCLING_COLOR,
+              border: "1px solid rgba(255,255,255,0.6)",
+              flexShrink: 0,
+            }}
+          />
+          <span>ハローサイクリング ステーション</span>
         </div>
-      </div>
-      <div style={{ marginTop: 7, color: isDemandTransitAnalysisRunning ? "#d8b4fe" : "rgba(255,255,255,0.7)", fontSize: 11 }}>
-        {isDemandTransitAnalysisRunning ? "比較条件を反映中…" : "この比較用の倍率を変えると、グラフは自動で更新されます。"}
-      </div>
-      {!isDemandTransitPanelVisible && (
+      )}
+      <div
+        style={{
+          marginTop: 10,
+          padding: "9px 10px",
+          borderRadius: 6,
+          background: isAddingCustomStop
+            ? "linear-gradient(180deg, rgba(14, 165, 233, 0.28) 0%, rgba(2, 132, 199, 0.2) 100%)"
+            : "linear-gradient(180deg, rgba(56, 189, 248, 0.16) 0%, rgba(15, 23, 42, 0.5) 100%)",
+          border: isAddingCustomStop
+            ? "2px solid #38bdf8"
+            : "1.5px solid #0284c7",
+          boxShadow: isAddingCustomStop
+            ? "0 0 12px rgba(56, 189, 248, 0.45)"
+            : "0 2px 8px rgba(2, 132, 199, 0.25)",
+        }}
+      >
+        <div style={{ fontWeight: "bold", color: "#38bdf8", fontSize: 12.5, letterSpacing: "0.02em" }}>
+          エリア対策シミュレーション（自由配置）
+        </div>
+        <div style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 3 }}>
+          対策したい空白地エリアの任意の場所に停留所を複数置いて、カバー建物の変化を確認できます。
+        </div>
         <button
           type="button"
-          onClick={onShowDemandTransitPanel}
-          disabled={isDemandTransitAnalysisRunning}
+          onClick={onToggleAddingCustomStop}
           style={{
-            width: "100%", marginTop: 6, padding: "5px 8px", border: "1px solid rgba(216,180,254,0.8)",
-            borderRadius: 4, background: isDemandTransitAnalysisRunning ? "rgba(126,34,206,0.25)" : "rgba(126,34,206,0.42)",
-            color: "#fff", fontSize: 11,
-            cursor: isDemandTransitAnalysisRunning ? "wait" : "pointer",
+            width: "100%",
+            marginTop: 7,
+            padding: "7px 8px",
+            border: isAddingCustomStop ? "1.5px solid #bae6fd" : "1px solid #38bdf8",
+            borderRadius: 4,
+            background: isAddingCustomStop
+              ? "linear-gradient(180deg, #0284c7 0%, #0369a1 100%)"
+              : "linear-gradient(180deg, rgba(2, 132, 199, 0.7) 0%, rgba(3, 105, 161, 0.7) 100%)",
+            color: "#fff",
+            fontWeight: "bold",
+            fontSize: 12,
+            cursor: "pointer",
+            boxShadow: isAddingCustomStop ? "0 0 8px rgba(56, 189, 248, 0.6)" : "none",
           }}
         >
-          {isDemandTransitAnalysisRunning ? "比較データを計算中…" : "比較グラフを表示"}
+          {isAddingCustomStop ? "📍 追加モード中（クリックで配置 / 終了）" : "＋ 地図クリックで停留所を追加"}
         </button>
-      )}
-      <div style={{ marginTop: 6 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+        {customStopCount > 0 && (
+          <div style={{ marginTop: 6, fontSize: 11, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+            <span>
+              配置中: <b>{customStopCount}箇所</b>（新規カバー <b style={{ color: "#38bdf8" }}>+{customStopNewlyCoveredCount}棟</b>）
+            </span>
+            <button
+              type="button"
+              onClick={onClearCustomStops}
+              style={{
+                padding: "2px 7px",
+                fontSize: 10.5,
+                borderRadius: 3,
+                border: "1px solid rgba(255,255,255,0.35)",
+                background: "rgba(255,255,255,0.1)",
+                color: "#fff",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >
+              クリア
+            </button>
+          </div>
+        )}
+        <div style={{ marginTop: 8, paddingTop: 7, borderTop: "1px solid rgba(125, 211, 252, 0.28)" }}>
+          <label style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+            <span>
+              カバー判定の実効距離基準:{" "}
+              {distanceModel === "network"
+                ? `${networkThresholdMultiplier.toFixed(1)}倍（道路網基準と連動・バス${Math.round(BUS_COVERAGE_THRESHOLD_METERS * networkThresholdMultiplier)}m圏）`
+                : `${analysisThresholdMultiplier.toFixed(1)}倍（バス${Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier)}m圏）`}
+            </span>
+          </label>
           <input
-            type="checkbox"
-            checked={showHelloCycling}
-            onChange={(e) => onShowHelloCyclingChange(e.target.checked)}
+            type="range"
+            min={1}
+            max={1.5}
+            step={0.1}
+            value={distanceModel === "network" ? networkThresholdMultiplier : analysisThresholdMultiplier}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              if (distanceModel === "network") {
+                onNetworkThresholdMultiplierChange(val);
+              } else {
+                onAnalysisThresholdMultiplierChange(val);
+              }
+            }}
+            style={{ width: "100%", marginTop: 2 }}
           />
-          <span>ハローサイクリング ステーションを表示</span>
-        </label>
+          <div style={{ fontSize: 10.5, opacity: 0.82, marginTop: 2 }}>
+            {distanceModel === "network"
+              ? "道路網距離モデル選択中は、道路網の判定緩和倍率と自動で同期します。"
+              : "傾斜補正込みで300m圏は厳しい場合などに緩和できます。変更すると水色のカバー範囲が即座に更新されます。"}
+          </div>
+        </div>
       </div>
+      {SHOW_AUTO_CANDIDATE_AND_COMPARISON_UI && (
+        <>
+          <div style={{ marginTop: 8 }}>
+            <label style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span>乗り場候補の数: {clusterCount}箇所</span>
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              step={1}
+              value={clusterCount}
+              onChange={(e) => onClusterCountChange(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+          <div style={{ marginTop: 7, color: isDemandTransitAnalysisRunning ? "#d8b4fe" : "rgba(255,255,255,0.7)", fontSize: 11 }}>
+            {isDemandTransitAnalysisRunning ? "比較条件を反映中…" : "この倍率を変えると、比較グラフや自由配置の水色カバーが自動で更新されます。"}
+          </div>
+          {!isDemandTransitPanelVisible && (
+            <button
+              type="button"
+              onClick={onShowDemandTransitPanel}
+              disabled={isDemandTransitAnalysisRunning}
+              style={{
+                width: "100%", marginTop: 6, padding: "5px 8px", border: "1px solid rgba(216,180,254,0.8)",
+                borderRadius: 4, background: isDemandTransitAnalysisRunning ? "rgba(126,34,206,0.25)" : "rgba(126,34,206,0.42)",
+                color: "#fff", fontSize: 11,
+                cursor: isDemandTransitAnalysisRunning ? "wait" : "pointer",
+              }}
+            >
+              {isDemandTransitAnalysisRunning ? "比較データを計算中…" : "比較グラフを表示"}
+            </button>
+          )}
+        </>
+      )}
+      {SHOW_HELLO_CYCLING_UI && (
+        <div style={{ marginTop: 6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showHelloCycling}
+              onChange={(e) => onShowHelloCyclingChange(e.target.checked)}
+            />
+            <span>ハローサイクリング ステーションを表示</span>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 自由配置した仮設停留所のシミュレーション結果・個別操作パネル（画面右上に表示）。
+function CustomStopSimulationPanel({
+  isVisible,
+  isAddingCustomStop,
+  isEvaluating,
+  summary,
+  analysisThresholdMultiplier,
+  onToggleAddingCustomStop,
+  onUndoLastStop,
+  onClearStops,
+  onRemoveStop,
+  onFlyToStop,
+}: {
+  isVisible: boolean;
+  isAddingCustomStop: boolean;
+  isEvaluating: boolean;
+  summary: CustomStopSimulationSummary | null;
+  analysisThresholdMultiplier: number;
+  onToggleAddingCustomStop: () => void;
+  onUndoLastStop: () => void;
+  onClearStops: () => void;
+  onRemoveStop: (id: number) => void;
+  onFlyToStop: (id: number) => void;
+}) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  if (!isVisible) return null;
+  const stopCount = summary?.stopCount ?? 0;
+  const newlyCovered = summary?.newlyCoveredBuildings ?? 0;
+  const newlyCoveredArea = summary?.newlyCoveredFloorArea ?? 0;
+  const severeReduction =
+    summary != null ? summary.severeGapBeforeBuildings - summary.severeGapAfterBuildings : 0;
+  const busThreshold = Math.round(BUS_COVERAGE_THRESHOLD_METERS * analysisThresholdMultiplier);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        right: 12,
+        top: 12,
+        zIndex: 14,
+        width: "min(360px, calc(100vw - 24px))",
+        maxHeight: "calc(100vh - 110px)",
+        overflowY: "auto",
+        boxSizing: "border-box",
+        background: "rgba(15, 23, 42, 0.92)",
+        color: "#fff",
+        padding: "10px 14px",
+        borderRadius: 8,
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        fontFamily: "sans-serif",
+        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.55)",
+        border: isAddingCustomStop
+          ? "1.5px solid #38bdf8"
+          : "1px solid rgba(56, 189, 248, 0.4)",
+        pointerEvents: "auto",
+      }}
+      onWheel={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+        <div
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          style={{ cursor: "pointer", flex: 1, userSelect: "none" }}
+        >
+          <div style={{ color: "#38bdf8", fontWeight: "bold", fontSize: 14 }}>
+            停留所の自由配置シミュレーション
+          </div>
+          <div style={{ fontSize: 11, color: "#cbd5e1", marginTop: 1 }}>
+            バス停基準: 実効距離{busThreshold}m圏（基準{analysisThresholdMultiplier.toFixed(1)}倍・傾斜補正込み）
+          </div>
+          {isCollapsed && (
+            <div style={{ fontSize: 11.5, color: "#e2e8f0", marginTop: 4 }}>
+              配置中: <b>{stopCount}箇所</b> ／ 新規カバー:{" "}
+              <b style={{ color: "#38bdf8" }}>+{newlyCovered.toLocaleString()}棟</b>
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          aria-label={isCollapsed ? "パネルを展開" : "パネルを折りたたむ"}
+          title={isCollapsed ? "展開する" : "折りたたむ"}
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          style={{
+            border: "1px solid rgba(148, 163, 184, 0.4)",
+            borderRadius: 4,
+            background: "rgba(255, 255, 255, 0.08)",
+            color: "#cbd5e1",
+            fontSize: 11,
+            lineHeight: 1,
+            cursor: "pointer",
+            padding: "4px 6px",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+          }}
+        >
+          {isCollapsed ? "▼ 展開" : "▲ 縮小"}
+        </button>
+      </div>
+
+      {!isCollapsed && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={onToggleAddingCustomStop}
+              style={{
+                flex: 1,
+                padding: "7px 10px",
+                borderRadius: 5,
+                border: isAddingCustomStop ? "1px solid #bae6fd" : "1px solid rgba(56, 189, 248, 0.7)",
+                background: isAddingCustomStop ? "#0284c7" : "rgba(2, 132, 199, 0.35)",
+                color: "#fff",
+                fontWeight: "bold",
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              {isAddingCustomStop ? "📍 地図クリックで追加中（終了する）" : "＋ 地図クリックで停留所を追加"}
+            </button>
+          </div>
+
+          {isAddingCustomStop && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "6px 8px",
+                borderRadius: 4,
+                background: "rgba(56, 189, 248, 0.16)",
+                border: "1px dashed rgba(125, 211, 252, 0.6)",
+                color: "#e0f2fe",
+                fontSize: 11.5,
+              }}
+            >
+              地図上の設置したい場所（道路沿いや赤い空白地の中）をクリックすると、停留所ピン（#1, #2…）が追加され、新たにカバーされる建物が<b style={{ color: "#38bdf8" }}>水色</b>に変わります。
+            </div>
+          )}
+
+          {isEvaluating && (
+            <div style={{ marginTop: 8, color: "#7dd3fc", fontSize: 11.5 }}>
+              周辺の地形傾斜とカバー建物を計算中…
+            </div>
+          )}
+
+          {stopCount === 0 ? (
+            <div style={{ marginTop: 10, color: "#94a3b8", fontSize: 12 }}>
+              まだ仮設停留所が配置されていません。上のボタンを押して地図上をクリックすると、何棟の建物がカバー圏内に入るか即座に試算できます。
+            </div>
+          ) : (
+            <>
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  background: "rgba(2, 132, 199, 0.18)",
+                  border: "1px solid rgba(56, 189, 248, 0.5)",
+                }}
+              >
+                <div style={{ fontSize: 11.5, color: "#bae6fd" }}>
+                  追加した停留所（{stopCount}箇所）の合算効果
+                </div>
+                <div style={{ marginTop: 2, fontSize: 22, fontWeight: "bold", color: "#38bdf8" }}>
+                  +{newlyCovered.toLocaleString()}棟{" "}
+                  <span style={{ fontSize: 13, fontWeight: "normal", color: "#e2e8f0" }}>
+                    が新規カバー（水色）
+                  </span>
+                </div>
+                {newlyCoveredArea > 0 && (
+                  <div style={{ fontSize: 11.5, color: "#cbd5e1" }}>
+                    新規カバー建物の延床面積合計: 約{Math.round(newlyCoveredArea).toLocaleString()}m²
+                  </div>
+                )}
+                {summary && (
+                  <div style={{ marginTop: 6, fontSize: 12, borderTop: "1px solid rgba(255,255,255,0.15)", paddingTop: 6 }}>
+                    <div>
+                      読み込み済み空白地: {summary.totalGapBuildingsBefore.toLocaleString()}棟 →{" "}
+                      <b>{summary.remainingGapBuildings.toLocaleString()}棟</b>
+                    </div>
+                    <div>
+                      非常に遠い空白地（濃い赤）: {summary.severeGapBeforeBuildings.toLocaleString()}棟 →{" "}
+                      <b>{summary.severeGapAfterBuildings.toLocaleString()}棟</b>
+                      {severeReduction > 0 && (
+                        <span style={{ color: "#86efac", fontWeight: "bold" }}>
+                          （-{severeReduction.toLocaleString()}棟）
+                        </span>
+                      )}
+                    </div>
+                    {summary.averageImprovedBusBeforeMeters != null &&
+                      summary.averageImprovedBusAfterMeters != null && (
+                        <div style={{ marginTop: 2 }}>
+                          周辺改善建物（{summary.improvedGapBuildingsCount}棟）の平均バス実効距離: 約
+                          {Math.round(summary.averageImprovedBusBeforeMeters)}m →{" "}
+                          <b style={{ color: "#7dd3fc" }}>
+                            約{Math.round(summary.averageImprovedBusAfterMeters)}m
+                          </b>
+                        </div>
+                      )}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontWeight: "bold", fontSize: 12, color: "#e2e8f0" }}>
+                    配置した停留所一覧（{stopCount}箇所）
+                  </span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={onUndoLastStop}
+                      style={{
+                        padding: "3px 8px",
+                        fontSize: 11,
+                        borderRadius: 4,
+                        border: "1px solid rgba(255,255,255,0.3)",
+                        background: "rgba(255,255,255,0.1)",
+                        color: "#fff",
+                        cursor: "pointer",
+                      }}
+                    >
+                      1つ戻す
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClearStops}
+                      style={{
+                        padding: "3px 8px",
+                        fontSize: 11,
+                        borderRadius: 4,
+                        border: "1px solid rgba(248,113,113,0.5)",
+                        background: "rgba(127,29,29,0.4)",
+                        color: "#fecaca",
+                        cursor: "pointer",
+                      }}
+                    >
+                      すべてクリア
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gap: 5 }}>
+                  {summary?.perStopStats.map((stat) => (
+                    <div
+                      key={stat.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 6,
+                        padding: "5px 8px",
+                        borderRadius: 5,
+                        background: "rgba(255,255,255,0.06)",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        fontSize: 11.5,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <span style={{ fontWeight: "bold", color: "#38bdf8" }}>{stat.label}</span>
+                        <span style={{ marginLeft: 6, color: "#e2e8f0" }}>
+                          単独カバー: <b>{stat.standaloneCoveredBuildings}棟</b>
+                        </span>
+                        {stopCount > 1 && (
+                          <span style={{ marginLeft: 4, color: "#94a3b8", fontSize: 10.5 }}>
+                            （最寄り貢献 {stat.primaryCoveredBuildings}棟）
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          onClick={() => onFlyToStop(stat.id)}
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: 10.5,
+                            borderRadius: 3,
+                            border: "1px solid rgba(125,211,252,0.45)",
+                            background: "rgba(2,132,199,0.28)",
+                            color: "#e0f2fe",
+                            cursor: "pointer",
+                          }}
+                        >
+                          移動
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveStop(stat.id)}
+                          aria-label={`${stat.label}を削除`}
+                          style={{
+                            padding: "2px 6px",
+                            fontSize: 10.5,
+                            borderRadius: 3,
+                            border: "1px solid rgba(255,255,255,0.25)",
+                            background: "rgba(255,255,255,0.08)",
+                            color: "#cbd5e1",
+                            cursor: "pointer",
+                          }}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -1111,6 +1624,10 @@ export default function PlateauViewer() {
   const [isDemandTransitAnalysisRunning, setIsDemandTransitAnalysisRunning] = useState(false);
   // 初見では地図の把握を優先し、比較結果は左上のボタンから任意で開く。
   const [isDemandTransitPanelVisible, setIsDemandTransitPanelVisible] = useState(false);
+  // 任意地点の停留所自由配置シミュレーション用のstate。
+  const [isAddingCustomStop, setIsAddingCustomStop] = useState(false);
+  const [isEvaluatingCustomStops, setIsEvaluatingCustomStops] = useState(false);
+  const [customStopSummary, setCustomStopSummary] = useState<CustomStopSimulationSummary | null>(null);
   // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
   // 再レンダリングでは作り直されないため、スライダーの最新値をそのクロージャから読めるように
   // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
@@ -1119,6 +1636,7 @@ export default function PlateauViewer() {
   const walkProfileRef = useRef(walkProfile);
   const distanceModelRef = useRef(distanceModel);
   const networkThresholdMultiplierRef = useRef(networkThresholdMultiplier);
+  const isAddingCustomStopRef = useRef(isAddingCustomStop);
   // ハローサイクリングのピンをinit()内で非同期生成する際、生成時点のトグル状態を
   // 直接参照するためのref（他のトグルと同じ理由。init()のuseEffectは依存配列が空なので、
   // stateを直接参照するとexhaustive-depsの警告が出るうえ値も更新されない）。
@@ -1130,6 +1648,7 @@ export default function PlateauViewer() {
     distanceModelRef.current = distanceModel;
     networkThresholdMultiplierRef.current = networkThresholdMultiplier;
     showHelloCyclingRef.current = showHelloCycling;
+    isAddingCustomStopRef.current = isAddingCustomStop;
   }, [
     demandTransitClusterCount,
     demandTransitAnalysisThresholdMultiplier,
@@ -1137,6 +1656,7 @@ export default function PlateauViewer() {
     distanceModel,
     networkThresholdMultiplier,
     showHelloCycling,
+    isAddingCustomStop,
   ]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
@@ -1153,6 +1673,12 @@ export default function PlateauViewer() {
   // 【実験的】道路網距離モデルの閾値倍率スライダーのonChangeから呼べるようにするための橋渡し
   // （applyWalkProfileRefと同じ理由。同期的にrefを書き換えてからキャッシュを無効化する）。
   const applyNetworkThresholdMultiplierRef = useRef<((multiplier: number) => void) | null>(null);
+  // 自由配置した仮設停留所の操作用ref。
+  const removeCustomStopRef = useRef<((id: number) => void) | null>(null);
+  const undoLastCustomStopRef = useRef<(() => void) | null>(null);
+  const clearCustomStopsRef = useRef<(() => void) | null>(null);
+  const flyToCustomStopRef = useRef<((id: number) => void) | null>(null);
+  const reapplyCustomStopScoresRef = useRef<(() => void) | null>(null);
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -1407,16 +1933,385 @@ export default function PlateauViewer() {
       // アンロード→再ロードされて新しいCesium3DTileFeatureインスタンスになった場合でも
       // 地形サンプリングをやり直さずに再着色できるようにする。featureScoreMapは
       // クリック時に「今画面にある生きたfeatureオブジェクト」からスコア情報を引くためのWeakMap。
-      type CachedScore = { color: Cesium.Color; info: BuildingScoreInfo };
+      type CachedScore = {
+        baseColor: Cesium.Color;
+        baseInfo: BuildingScoreInfo;
+        color: Cesium.Color;
+        info: BuildingScoreInfo;
+      };
       const buildingScoreCache = new Map<string, CachedScore>();
       let featureScoreMap = new WeakMap<Cesium.Cesium3DTileFeature, BuildingScoreInfo>();
+      const loadedTiles = new Set<Cesium.Cesium3DTile>();
       // 【実験的】道路網距離モデル用の事前計算データ（scripts/road-network/03_compute_scores.py
       // の出力）。"network"に初めて切り替えたときにapplyDistanceModelが遅延フェッチしてここへ
       // 格納する。buildingIdをキーに直接引けるので、該当する建物は地形サンプリング不要で
       // 即座に色を決められる。
       let networkScoreMap: Map<string, BuildingNetworkScoreRow> | null = null;
+      let routingGraphCache: RoutingGraph | null = null;
+      let routingGraphPromise: Promise<RoutingGraph | null> | null = null;
       // 成功した世代だけ処理済みとし、失敗はバックオフ後にtileVisibleから再試行する。
       const tileWork = new TileWorkGate<Cesium.Cesium3DTile>();
+
+      // 自由配置した仮設停留所（複数配置可）のランタイム状態。
+      type CustomStopRuntime = CustomStopSite & {
+        entity: Cesium.Entity;
+        buildingDistances: Map<string, number>;
+        evaluatedBuildingIds: Set<string>;
+        routedNodeDistances?: Float64Array;
+      };
+      let customStops: CustomStopRuntime[] = [];
+      let nextCustomStopId = 1;
+      let customStopEvalGeneration = 0;
+      let customStopEvalTimer: ReturnType<typeof setTimeout> | null = null;
+
+      async function ensureRoutingGraph(): Promise<RoutingGraph | null> {
+        if (routingGraphCache) return routingGraphCache;
+        if (routingGraphPromise) return routingGraphPromise;
+        routingGraphPromise = (async () => {
+          try {
+            const res = await fetch("/data/routing-graph.json");
+            if (!res.ok) throw new Error(`routing-graph: ${res.status}`);
+            const graph: RoutingGraph = await res.json();
+            if (cancelled) return null;
+            routingGraphCache = graph;
+            return graph;
+          } catch (err) {
+            console.warn("道路網グラフの取得に失敗しました", err);
+            return null;
+          } finally {
+            routingGraphPromise = null;
+          }
+        })();
+        return routingGraphPromise;
+      }
+
+      function refreshLoadedTileFeatureColors() {
+        for (const tile of loadedTiles) {
+          const content = tile.content;
+          if (!content || content.featuresLength === 0) continue;
+          for (let i = 0; i < content.featuresLength; i++) {
+            const feature = content.getFeature(i);
+            const usage = feature.getProperty("bldg:usage") as string | undefined;
+            if (!usage || !usage.includes(RESIDENTIAL_USAGE_SUBSTRING)) continue;
+            const lng = feature.getProperty("_x") as number | undefined;
+            const lat = feature.getProperty("_y") as number | undefined;
+            if (typeof lng !== "number" || typeof lat !== "number") continue;
+            const buildingId =
+              (feature.getProperty("uro:BuildingIDAttribute_uro:buildingID") as string | undefined) ??
+              `${lng},${lat}`;
+            const cached = buildingScoreCache.get(buildingId);
+            if (cached) {
+              feature.color = cached.color;
+              featureScoreMap.set(feature, cached.info);
+            }
+          }
+        }
+        viewer.scene.requestRender();
+      }
+
+      function reapplyCustomStopScoresToBuildings() {
+        if (cancelled) return;
+        if (customStops.length === 0) {
+          for (const cached of buildingScoreCache.values()) {
+            cached.color = cached.baseColor;
+            cached.info = cached.baseInfo;
+          }
+          setCustomStopSummary(null);
+          refreshLoadedTileFeatureColors();
+          return;
+        }
+
+        const records: CustomStopBuildingRecord[] = [];
+        for (const [buildingId, cached] of buildingScoreCache.entries()) {
+          records.push({
+            buildingId,
+            lat: cached.baseInfo.lat,
+            lng: cached.baseInfo.lng,
+            baseBusEffectiveDistanceMeters: cached.baseInfo.busEffectiveDistanceMeters,
+            baseStationEffectiveDistanceMeters: cached.baseInfo.stationEffectiveDistanceMeters,
+            baseCoverageRatio: cached.baseInfo.coverageRatio,
+            totalFloorArea: cached.baseInfo.totalFloorArea,
+          });
+        }
+
+        const stopDistanceMap = new Map<number, ReadonlyMap<string, number>>();
+        for (const stop of customStops) {
+          stopDistanceMap.set(stop.id, stop.buildingDistances);
+        }
+
+        const effectiveMultiplier =
+          distanceModelRef.current === "network"
+            ? networkThresholdMultiplierRef.current
+            : demandTransitAnalysisThresholdMultiplierRef.current;
+        const thresholdMultiplier = effectiveMultiplier;
+        const { outcomes, summary } = evaluateCustomStopsSimulation(
+          records,
+          customStops,
+          stopDistanceMap,
+          thresholdMultiplier
+        );
+        const walkSpeed = WALK_PROFILES[walkProfileRef.current].walkSpeedMPerMin;
+
+        for (const [buildingId, cached] of buildingScoreCache.entries()) {
+          const outcome = outcomes.get(buildingId);
+          if (outcome && outcome.bestStopId != null && outcome.bestStopLabel != null) {
+            cached.color = outcome.isNewlyCovered
+              ? NEWLY_COVERED_BUILDING_COLOR
+              : colorForCoverageRatio(outcome.afterCoverageRatio);
+            cached.info = {
+              ...cached.baseInfo,
+              customStopImprovement: {
+                stopId: outcome.bestStopId,
+                stopLabel: outcome.bestStopLabel,
+                afterBusEffectiveDistanceMeters: outcome.afterBusEffectiveDistanceMeters,
+                afterBusWalkMinutes: outcome.afterBusEffectiveDistanceMeters / walkSpeed,
+                afterCoverageRatio: outcome.afterCoverageRatio,
+                isNewlyCovered: outcome.isNewlyCovered,
+              },
+            };
+          } else {
+            cached.color = cached.baseColor;
+            cached.info = cached.baseInfo;
+          }
+        }
+
+        setCustomStopSummary(summary);
+        refreshLoadedTileFeatureColors();
+      }
+
+      async function evaluatePendingBuildingsForCustomStops() {
+        if (cancelled) return;
+        if (customStops.length === 0) {
+          setIsEvaluatingCustomStops(false);
+          reapplyCustomStopScoresToBuildings();
+          return;
+        }
+
+        const evalGen = ++customStopEvalGeneration;
+        const profile = WALK_PROFILES[walkProfileRef.current];
+
+        if (distanceModelRef.current === "network" && networkScoreMap) {
+          setIsEvaluatingCustomStops(true);
+          const graph = await ensureRoutingGraph();
+          if (cancelled || evalGen !== customStopEvalGeneration) return;
+          if (graph) {
+            const router = new NetworkRouter(graph, walkProfileRef.current);
+            for (const stop of customStops) {
+              if (!stop.routedNodeDistances) {
+                try {
+                  const routed = router.fromCandidate(stop.lat, stop.lng);
+                  stop.routedNodeDistances = routed.distances;
+                } catch (err) {
+                  console.warn("仮設停留所の道路網スナップに失敗しました", err);
+                }
+              }
+              if (stop.routedNodeDistances) {
+                for (const [buildingId, cached] of buildingScoreCache.entries()) {
+                  if (stop.evaluatedBuildingIds.has(buildingId)) continue;
+                  stop.evaluatedBuildingIds.add(buildingId);
+                  const row = networkScoreMap.get(buildingId);
+                  if (!row) continue;
+                  const dist = stop.routedNodeDistances[row.networkNode];
+                  if (Number.isFinite(dist) && dist < cached.baseInfo.busEffectiveDistanceMeters) {
+                    stop.buildingDistances.set(buildingId, dist);
+                  }
+                }
+              }
+            }
+          }
+          setIsEvaluatingCustomStops(false);
+          reapplyCustomStopScoresToBuildings();
+          return;
+        }
+
+        type PendingPairTask = {
+          stop: CustomStopRuntime;
+          buildingId: string;
+          baseInfo: BuildingScoreInfo;
+          pair: EffectiveDistancePair;
+        };
+        const tasks: PendingPairTask[] = [];
+
+        for (const stop of customStops) {
+          for (const [buildingId, cached] of buildingScoreCache.entries()) {
+            if (stop.evaluatedBuildingIds.has(buildingId)) continue;
+            stop.evaluatedBuildingIds.add(buildingId);
+            const straight = haversineMeters(
+              cached.baseInfo.lat,
+              cached.baseInfo.lng,
+              stop.lat,
+              stop.lng
+            );
+            // 傾斜補正後の実効距離は常に直線距離以上になるため、直線距離の時点で
+            // 既存の最寄りバス停の実効距離以上であれば短縮されることはなく、地形サンプリング不要。
+            if (straight >= cached.baseInfo.busEffectiveDistanceMeters) continue;
+            tasks.push({
+              stop,
+              buildingId,
+              baseInfo: cached.baseInfo,
+              pair: {
+                originLat: cached.baseInfo.lat,
+                originLng: cached.baseInfo.lng,
+                destLat: stop.lat,
+                destLng: stop.lng,
+              },
+            });
+          }
+        }
+
+        if (tasks.length === 0) {
+          setIsEvaluatingCustomStops(false);
+          reapplyCustomStopScoresToBuildings();
+          return;
+        }
+
+        setIsEvaluatingCustomStops(true);
+        try {
+          const results = await computeEffectiveDistances(
+            terrainProvider,
+            tasks.map((t) => t.pair),
+            profile.slopePenaltyFactor
+          );
+          if (cancelled || evalGen !== customStopEvalGeneration) return;
+          tasks.forEach((task, idx) => {
+            const eff = results[idx].effectiveDistanceMeters;
+            if (eff < task.baseInfo.busEffectiveDistanceMeters) {
+              task.stop.buildingDistances.set(task.buildingId, eff);
+            }
+          });
+        } catch (err) {
+          console.warn(
+            "仮設停留所の地形サンプリングに失敗したため、建物の既存勾配倍率で概算します。",
+            err
+          );
+          if (cancelled || evalGen !== customStopEvalGeneration) return;
+          for (const task of tasks) {
+            const straight = haversineMeters(
+              task.pair.originLat,
+              task.pair.originLng,
+              task.pair.destLat,
+              task.pair.destLng
+            );
+            const slopeFactor = Math.max(
+              1,
+              task.baseInfo.busEffectiveDistanceMeters /
+                Math.max(task.baseInfo.busStraightDistanceMeters, 1)
+            );
+            const eff = straight * slopeFactor;
+            if (eff < task.baseInfo.busEffectiveDistanceMeters) {
+              task.stop.buildingDistances.set(task.buildingId, eff);
+            }
+          }
+        } finally {
+          if (!cancelled && evalGen === customStopEvalGeneration) {
+            setIsEvaluatingCustomStops(false);
+            reapplyCustomStopScoresToBuildings();
+          }
+        }
+      }
+
+      function scheduleCustomStopEvaluation(delayMs = 80) {
+        if (customStops.length === 0) return;
+        if (customStopEvalTimer) clearTimeout(customStopEvalTimer);
+        customStopEvalTimer = setTimeout(() => {
+          customStopEvalTimer = null;
+          void evaluatePendingBuildingsForCustomStops();
+        }, delayMs);
+      }
+
+      function reindexCustomStops() {
+        customStops.forEach((stop, index) => {
+          const num = index + 1;
+          stop.label = `仮設停留所 #${num}`;
+          stop.entity.name = stop.label;
+          if (stop.entity.billboard) {
+            stop.entity.billboard.image = new Cesium.ConstantProperty(
+              createCustomStopPinIconDataUrl(num)
+            );
+          }
+        });
+      }
+
+      function addCustomStop(lat: number, lng: number) {
+        const id = nextCustomStopId++;
+        const num = customStops.length + 1;
+        const label = `仮設停留所 #${num}`;
+        const entity = viewer.entities.add({
+          name: label,
+          position: Cesium.Cartesian3.fromDegrees(lng, lat),
+          properties: { isCustomStop: true, customStopId: id },
+          billboard: {
+            image: createCustomStopPinIconDataUrl(num),
+            width: 28,
+            height: 28,
+            verticalOrigin: Cesium.VerticalOrigin.CENTER,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+        customStops.push({
+          id,
+          label,
+          lat,
+          lng,
+          entity,
+          buildingDistances: new Map(),
+          evaluatedBuildingIds: new Set(),
+        });
+        void evaluatePendingBuildingsForCustomStops();
+      }
+
+      function removeCustomStop(id: number) {
+        const idx = customStops.findIndex((s) => s.id === id);
+        if (idx < 0) return;
+        const [removed] = customStops.splice(idx, 1);
+        viewer.entities.remove(removed.entity);
+        reindexCustomStops();
+        ++customStopEvalGeneration;
+        setIsEvaluatingCustomStops(false);
+        ++popupRequestRef.current;
+        setPopup(null);
+        reapplyCustomStopScoresToBuildings();
+      }
+
+      function undoLastCustomStop() {
+        if (customStops.length === 0) return;
+        const last = customStops[customStops.length - 1];
+        removeCustomStop(last.id);
+      }
+
+      function clearCustomStops() {
+        for (const stop of customStops) {
+          viewer.entities.remove(stop.entity);
+        }
+        customStops = [];
+        nextCustomStopId = 1;
+        ++customStopEvalGeneration;
+        setIsEvaluatingCustomStops(false);
+        ++popupRequestRef.current;
+        setPopup(null);
+        reapplyCustomStopScoresToBuildings();
+      }
+
+      function flyToCustomStop(id: number) {
+        const stop = customStops.find((s) => s.id === id);
+        if (!stop) return;
+        const center = Cesium.Cartesian3.fromDegrees(stop.lng, stop.lat);
+        const sphere = new Cesium.BoundingSphere(center, 550);
+        viewer.camera.flyToBoundingSphere(sphere, {
+          offset: new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(INITIAL_VIEW_HEADING),
+            Cesium.Math.toRadians(INITIAL_VIEW_PITCH)
+          ),
+          duration: 0.9,
+        });
+      }
+
+      removeCustomStopRef.current = removeCustomStop;
+      undoLastCustomStopRef.current = undoLastCustomStop;
+      clearCustomStopsRef.current = clearCustomStops;
+      flyToCustomStopRef.current = flyToCustomStop;
+      reapplyCustomStopScoresRef.current = reapplyCustomStopScoresToBuildings;
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
@@ -1452,15 +2347,15 @@ export default function PlateauViewer() {
           ? demandTransitAnalysisMembers
           : [];
         if (!demandTransitAnalysisMembers) {
-          for (const { info } of buildingScoreCache.values()) {
-            if (info.coverageRatio > DEMAND_TRANSIT_GAP_RATIO_THRESHOLD) {
+          for (const { baseInfo } of buildingScoreCache.values()) {
+            if (baseInfo.coverageRatio > DEMAND_TRANSIT_GAP_RATIO_THRESHOLD) {
               gapBuildings.push({
-                lat: info.lat,
-                lng: info.lng,
-                busStraightDistanceMeters: info.busStraightDistanceMeters,
-                busEffectiveDistanceMeters: info.busEffectiveDistanceMeters,
-                stationEffectiveDistanceMeters: info.stationEffectiveDistanceMeters,
-                coverageRatio: info.coverageRatio,
+                lat: baseInfo.lat,
+                lng: baseInfo.lng,
+                busStraightDistanceMeters: baseInfo.busStraightDistanceMeters,
+                busEffectiveDistanceMeters: baseInfo.busEffectiveDistanceMeters,
+                stationEffectiveDistanceMeters: baseInfo.stationEffectiveDistanceMeters,
+                coverageRatio: baseInfo.coverageRatio,
               });
             }
           }
@@ -1472,6 +2367,7 @@ export default function PlateauViewer() {
         }
         demandTransitCandidates = [];
 
+        if (!SHOW_AUTO_CANDIDATE_AND_COMPARISON_UI) return;
         if (gapBuildings.length < DEMAND_TRANSIT_MIN_BUILDINGS) return;
 
         const refLat = gapBuildings.reduce((sum, b) => sum + b.lat, 0) / gapBuildings.length;
@@ -1643,6 +2539,7 @@ export default function PlateauViewer() {
         const content = tile.content;
         const isCurrent = () => !cancelled && generation === tileWork.generation && tile.content === content;
         if (!content || content.featuresLength === 0) return true;
+        loadedTiles.add(tile);
 
         type Candidate = {
           feature: Cesium.Cesium3DTileFeature;
@@ -1694,7 +2591,7 @@ export default function PlateauViewer() {
           if (!isCurrent()) return;
           const color = colorForCoverageRatio(info.coverageRatio);
           feature.color = color;
-          buildingScoreCache.set(buildingId, { color, info });
+          buildingScoreCache.set(buildingId, { baseColor: color, baseInfo: info, color, info });
           featureScoreMap.set(feature, info);
         }
 
@@ -1748,6 +2645,7 @@ export default function PlateauViewer() {
 
         if (liveCandidates.length === 0) {
           scheduleDemandTransitRecompute();
+          scheduleCustomStopEvaluation();
           return true;
         }
 
@@ -1846,6 +2744,7 @@ export default function PlateauViewer() {
         });
 
         scheduleDemandTransitRecompute();
+        scheduleCustomStopEvaluation();
         return true;
       }
 
@@ -1856,12 +2755,22 @@ export default function PlateauViewer() {
       }
       const removeLoad = tileset?.tileLoad.addEventListener(processTileIfNeeded);
       const removeVisible = tileset?.tileVisible.addEventListener(processTileIfNeeded);
-      const removeUnload = tileset?.tileUnload.addEventListener(tile => tileWork.forget(tile));
+      const removeUnload = tileset?.tileUnload.addEventListener(tile => {
+        loadedTiles.delete(tile);
+        tileWork.forget(tile);
+      });
 
       function invalidateScores() {
         const generation = tileWork.invalidate();
         buildingScoreCache.clear();
         featureScoreMap = new WeakMap();
+        loadedTiles.clear();
+        ++customStopEvalGeneration;
+        for (const stop of customStops) {
+          stop.buildingDistances.clear();
+          stop.evaluatedBuildingIds.clear();
+          delete stop.routedNodeDistances;
+        }
         ++popupRequestRef.current;
         setPopup(null);
         demandTransitAnalysisMembers = null;
@@ -1904,6 +2813,7 @@ export default function PlateauViewer() {
         analysisWorker?.terminate();
         if (demandTransitRecomputeTimer) clearTimeout(demandTransitRecomputeTimer);
         if (demandTransitAnalysisTimer) clearTimeout(demandTransitAnalysisTimer);
+        if (customStopEvalTimer) clearTimeout(customStopEvalTimer);
         tileWork.invalidate();
       };
 
@@ -1915,6 +2825,79 @@ export default function PlateauViewer() {
         candidatePopupRef.current = false;
         const picked = viewer.scene.pick(movement.position);
         const entity = picked?.id;
+
+        if (entity instanceof Cesium.Entity && entity.properties?.isCustomStop?.getValue()) {
+          const customStopId: number = entity.properties.customStopId?.getValue();
+          const stop = customStops.find((s) => s.id === customStopId);
+          if (!stop) {
+            setPopup(null);
+            return;
+          }
+          const requestId = ++popupRequestRef.current;
+          const effectiveMultiplier =
+            distanceModelRef.current === "network"
+              ? networkThresholdMultiplierRef.current
+              : demandTransitAnalysisThresholdMultiplierRef.current;
+          const busThreshold = BUS_COVERAGE_THRESHOLD_METERS * effectiveMultiplier;
+          let standaloneCount = 0;
+          for (const [buildingId, dist] of stop.buildingDistances.entries()) {
+            const cached = buildingScoreCache.get(buildingId);
+            if (cached && cached.baseInfo.coverageRatio > 1 && dist <= busThreshold) {
+              standaloneCount++;
+            }
+          }
+          let areaNameText = "取得中…";
+          const buildCustomStopLines = (): ReactNode[] => [
+            `推定地区名: ${areaNameText}`,
+            <span key="cov">
+              単独でカバー圏内に入る空白地建物:{" "}
+              <b style={{ color: "#38bdf8" }}>{standaloneCount}棟</b>
+            </span>,
+            <button
+              key="del"
+              type="button"
+              onClick={() => removeCustomStop(stop.id)}
+              style={{
+                marginTop: 6,
+                padding: "4px 10px",
+                fontSize: 12,
+                borderRadius: 4,
+                border: "1px solid rgba(248,113,113,0.6)",
+                background: "rgba(127,29,29,0.55)",
+                color: "#fecaca",
+                cursor: "pointer",
+              }}
+            >
+              この仮設停留所を削除
+            </button>,
+          ];
+          setPopup({ title: `${stop.label}（自由配置）`, lines: buildCustomStopLines() });
+
+          void (async () => {
+            try {
+              const res = await fetch(`/api/reverse-geocode?lat=${stop.lat}&lng=${stop.lng}`);
+              if (!res.ok) throw new Error(`reverse-geocode API returned ${res.status}`);
+              const data: { areaName: string | null } = await res.json();
+              if (cancelled || requestId !== popupRequestRef.current) return;
+              areaNameText = data.areaName ?? "不明";
+              setPopup({ title: `${stop.label}（自由配置）`, lines: buildCustomStopLines() });
+            } catch {
+              if (cancelled || requestId !== popupRequestRef.current) return;
+              areaNameText = "取得できませんでした";
+              setPopup({ title: `${stop.label}（自由配置）`, lines: buildCustomStopLines() });
+            }
+          })();
+          return;
+        }
+
+        if (isAddingCustomStopRef.current) {
+          const groundPos = pickGroundLatLng(viewer, movement.position);
+          if (groundPos) {
+            addCustomStop(groundPos.lat, groundPos.lng);
+          }
+          return;
+        }
+
         if (entity instanceof Cesium.Entity && entity.properties?.isBusStop?.getValue()) {
           const operator: string = entity.properties.operator?.getValue();
           const routes: BusRoute[] = entity.properties.routes?.getValue() ?? [];
@@ -2028,11 +3011,28 @@ export default function PlateauViewer() {
         } else if (picked instanceof Cesium.Cesium3DTileFeature) {
           const info = featureScoreMap.get(picked);
           if (info) {
+            const imp = info.customStopImprovement;
+            const statusNode: ReactNode = imp?.isNewlyCovered ? (
+              <span key="status" style={{ color: "#38bdf8", fontWeight: "bold" }}>
+                判定: 新規カバー（{imp.stopLabel} により空白地解消）
+              </span>
+            ) : (
+              `判定: ${info.isCovered ? "カバーされている" : "交通空白地"}`
+            );
             setPopup({
               title: info.usage,
               lines: [
-                `判定: ${info.isCovered ? "カバーされている" : "交通空白地"}`,
-                `最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
+                statusNode,
+                ...(imp
+                  ? [
+                      <span key="customStop" style={{ color: "#7dd3fc" }}>
+                        最寄り仮設停留所: {imp.stopLabel}（実効距離 約
+                        {Math.round(imp.afterBusEffectiveDistanceMeters)}m・徒歩
+                        {Math.round(imp.afterBusWalkMinutes)}分）
+                      </span>,
+                    ]
+                  : []),
+                `既存最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
                 `最寄り鉄道駅: ${info.nearestStationName}（実効距離 約${Math.round(info.stationEffectiveDistanceMeters)}m・徒歩${Math.round(info.stationWalkMinutes)}分）`,
                 ...(info.totalFloorArea != null ? [`延床面積: 約${Math.round(info.totalFloorArea)}m²`] : []),
                 `プロファイル: ${info.walkProfileLabel}`,
@@ -2071,6 +3071,11 @@ export default function PlateauViewer() {
       applyWalkProfileRef.current = null;
       applyDistanceModelRef.current = null;
       applyNetworkThresholdMultiplierRef.current = null;
+      removeCustomStopRef.current = null;
+      undoLastCustomStopRef.current = null;
+      clearCustomStopsRef.current = null;
+      flyToCustomStopRef.current = null;
+      reapplyCustomStopScoresRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -2079,7 +3084,14 @@ export default function PlateauViewer() {
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+      <div
+        ref={containerRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          cursor: isAddingCustomStop ? "crosshair" : "default",
+        }}
+      />
       <Legend
         clusterCount={demandTransitClusterCount}
         analysisThresholdMultiplier={demandTransitAnalysisThresholdMultiplier}
@@ -2097,8 +3109,10 @@ export default function PlateauViewer() {
         onAnalysisThresholdMultiplierChange={(value) => {
           // ドラッグ中の細かな変化はinit側でまとめ、操作が止まった条件だけを再計算する。
           // 既存のグラフはローディング表示の下に残し、完了時に新条件の結果へ差し替える。
+          // 自由配置した仮設停留所の水色カバー判定には即座に反映する。
           demandTransitAnalysisThresholdMultiplierRef.current = value;
           setDemandTransitAnalysisThresholdMultiplier(value);
+          reapplyCustomStopScoresRef.current?.();
           if (demandTransitPlanAnalysis || isDemandTransitPanelVisible) {
             scheduleDemandTransitAnalysisRef.current?.();
           }
@@ -2123,6 +3137,7 @@ export default function PlateauViewer() {
         onNetworkThresholdMultiplierChange={(value) => {
           setNetworkThresholdMultiplier(value);
           applyNetworkThresholdMultiplierRef.current?.(value);
+          reapplyCustomStopScoresRef.current?.();
         }}
         onToggleExperimentalDistanceModel={setShowExperimentalDistanceModel}
         isDemandTransitAnalysisRunning={isDemandTransitAnalysisRunning}
@@ -2133,6 +3148,31 @@ export default function PlateauViewer() {
             scheduleDemandTransitAnalysisRef.current?.(0);
           }
         }}
+        isAddingCustomStop={isAddingCustomStop}
+        customStopCount={customStopSummary?.stopCount ?? 0}
+        customStopNewlyCoveredCount={customStopSummary?.newlyCoveredBuildings ?? 0}
+        onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
+        onClearCustomStops={() => {
+          setIsAddingCustomStop(false);
+          clearCustomStopsRef.current?.();
+        }}
+      />
+      <CustomStopSimulationPanel
+        isVisible={isAddingCustomStop || (customStopSummary?.stopCount ?? 0) > 0}
+        isAddingCustomStop={isAddingCustomStop}
+        isEvaluating={isEvaluatingCustomStops}
+        summary={customStopSummary}
+        analysisThresholdMultiplier={
+          distanceModel === "network" ? networkThresholdMultiplier : demandTransitAnalysisThresholdMultiplier
+        }
+        onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
+        onUndoLastStop={() => undoLastCustomStopRef.current?.()}
+        onClearStops={() => {
+          setIsAddingCustomStop(false);
+          clearCustomStopsRef.current?.();
+        }}
+        onRemoveStop={(id) => removeCustomStopRef.current?.(id)}
+        onFlyToStop={(id) => flyToCustomStopRef.current?.(id)}
       />
       {analysisError && <div role="alert" style={{position:'absolute',right:12,top:12,zIndex:20,maxWidth:360,padding:12,background:'#7f1d1d',color:'white'}}>{analysisError}<button onClick={()=>setAnalysisError(null)} aria-label="通知を閉じる">×</button></div>}
       <UncoloredBuildingsNote />

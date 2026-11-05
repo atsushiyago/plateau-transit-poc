@@ -5,8 +5,8 @@ export type WalkProfile = "general" | "elderly";
 export const WALK_PROFILES: Record<WalkProfile, { label: string; slopePenaltyFactor: number; walkSpeedMPerMin: number }> = {
   // 勾配1あたり実効距離を何倍割り増しするかの係数。例: 勾配0.1(10%)ならslopePenaltyFactor=3で
   // 実効距離が1.3倍になる。徒歩速度は分速67m≒時速4kmが一般的な成人の目安。
-  general: { label: "一般", slopePenaltyFactor: 3, walkSpeedMPerMin: 67 },
-  elderly: { label: "高齢者（坂道に配慮）", slopePenaltyFactor: 6, walkSpeedMPerMin: 50 },
+  general: { label: "一般（標準の坂道補正）", slopePenaltyFactor: 3, walkSpeedMPerMin: 67 },
+  elderly: { label: "高齢者（坂道の負荷係数2倍）", slopePenaltyFactor: 6, walkSpeedMPerMin: 50 },
 };
 export type DistanceModel = "straight" | "network";
 export const DISTANCE_MODEL_DEFAULT: DistanceModel = "straight";
@@ -244,5 +244,195 @@ export function buildGreedyDemandTransitPlan(
   return { sites, results };
 }
 
-// デマンド交通乗り場候補ピンを、既存の丸ピン（バス停等）と見た目で区別するため、
-// canvasで紫の四角アイコンを生成してbillboard画像として使う。
+export type CustomStopSite = {
+  id: number;
+  label: string;
+  lat: number;
+  lng: number;
+};
+
+export type CustomStopBuildingRecord = {
+  buildingId: string;
+  lat: number;
+  lng: number;
+  baseBusEffectiveDistanceMeters: number;
+  baseStationEffectiveDistanceMeters: number;
+  baseCoverageRatio: number;
+  totalFloorArea: number | null;
+};
+
+export type CustomStopBuildingOutcome = {
+  bestStopId: number | null;
+  bestStopLabel: string | null;
+  bestCustomDistanceMeters: number;
+  afterBusEffectiveDistanceMeters: number;
+  afterCoverageRatio: number;
+  isNewlyCovered: boolean;
+  isImprovedGap: boolean;
+};
+
+export type CustomStopPerSiteStat = {
+  id: number;
+  label: string;
+  lat: number;
+  lng: number;
+  standaloneCoveredBuildings: number;
+  primaryCoveredBuildings: number;
+};
+
+export type CustomStopSimulationSummary = {
+  stopCount: number;
+  totalGapBuildingsBefore: number;
+  newlyCoveredBuildings: number;
+  newlyCoveredFloorArea: number;
+  remainingGapBuildings: number;
+  severeGapBeforeBuildings: number;
+  severeGapAfterBuildings: number;
+  improvedGapBuildingsCount: number;
+  averageImprovedBusBeforeMeters: number | null;
+  averageImprovedBusAfterMeters: number | null;
+  perStopStats: CustomStopPerSiteStat[];
+};
+
+export function evaluateCustomStopsSimulation(
+  buildings: Iterable<CustomStopBuildingRecord>,
+  stops: CustomStopSite[],
+  stopDistanceMap: ReadonlyMap<number, ReadonlyMap<string, number>>,
+  thresholdMultiplier = 1
+): {
+  outcomes: Map<string, CustomStopBuildingOutcome>;
+  summary: CustomStopSimulationSummary;
+} {
+  const busThreshold = BUS_COVERAGE_THRESHOLD_METERS * thresholdMultiplier;
+  const stationThreshold = STATION_COVERAGE_THRESHOLD_METERS * thresholdMultiplier;
+  const outcomes = new Map<string, CustomStopBuildingOutcome>();
+
+  const standaloneCounts = new Map<number, number>();
+  const primaryCounts = new Map<number, number>();
+  for (const stop of stops) {
+    standaloneCounts.set(stop.id, 0);
+    primaryCounts.set(stop.id, 0);
+  }
+
+  let totalGapBuildingsBefore = 0;
+  let newlyCoveredBuildings = 0;
+  let newlyCoveredFloorArea = 0;
+  let remainingGapBuildings = 0;
+  let severeGapBeforeBuildings = 0;
+  let severeGapAfterBuildings = 0;
+  let improvedGapBuildingsCount = 0;
+  let improvedBusBeforeSum = 0;
+  let improvedBusAfterSum = 0;
+
+  for (const b of buildings) {
+    const isGapBefore = b.baseCoverageRatio > 1;
+    if (isGapBefore) {
+      totalGapBuildingsBefore++;
+      if (b.baseCoverageRatio > 1.5) {
+        severeGapBeforeBuildings++;
+      }
+    }
+
+    let bestStopId: number | null = null;
+    let bestStopLabel: string | null = null;
+    let bestCustomDistanceMeters = Infinity;
+
+    for (const stop of stops) {
+      const dist = stopDistanceMap.get(stop.id)?.get(b.buildingId);
+      if (
+        dist !== undefined &&
+        Number.isFinite(dist) &&
+        dist < b.baseBusEffectiveDistanceMeters
+      ) {
+        if (isGapBefore && dist <= busThreshold) {
+          standaloneCounts.set(stop.id, (standaloneCounts.get(stop.id) ?? 0) + 1);
+        }
+        if (dist < bestCustomDistanceMeters) {
+          bestCustomDistanceMeters = dist;
+          bestStopId = stop.id;
+          bestStopLabel = stop.label;
+        }
+      }
+    }
+
+    const afterBusEffectiveDistanceMeters = Math.min(
+      b.baseBusEffectiveDistanceMeters,
+      bestCustomDistanceMeters
+    );
+    const isNewlyCovered = isGapBefore && bestCustomDistanceMeters <= busThreshold;
+    const afterCoverageRatio =
+      bestCustomDistanceMeters < b.baseBusEffectiveDistanceMeters
+        ? Math.min(
+            b.baseCoverageRatio,
+            bestCustomDistanceMeters / busThreshold,
+            b.baseStationEffectiveDistanceMeters / stationThreshold
+          )
+        : b.baseCoverageRatio;
+    const isImprovedGap =
+      isGapBefore &&
+      (afterBusEffectiveDistanceMeters < b.baseBusEffectiveDistanceMeters - 0.5 || isNewlyCovered);
+
+    if (isGapBefore) {
+      if (isNewlyCovered) {
+        newlyCoveredBuildings++;
+        if (b.totalFloorArea != null && Number.isFinite(b.totalFloorArea)) {
+          newlyCoveredFloorArea += b.totalFloorArea;
+        }
+        if (bestStopId !== null) {
+          primaryCounts.set(bestStopId, (primaryCounts.get(bestStopId) ?? 0) + 1);
+        }
+      } else {
+        remainingGapBuildings++;
+      }
+      if (afterCoverageRatio > 1.5) {
+        severeGapAfterBuildings++;
+      }
+      if (isImprovedGap) {
+        improvedGapBuildingsCount++;
+        improvedBusBeforeSum += b.baseBusEffectiveDistanceMeters;
+        improvedBusAfterSum += afterBusEffectiveDistanceMeters;
+      }
+    }
+
+    if (stops.length > 0 && bestCustomDistanceMeters < b.baseBusEffectiveDistanceMeters) {
+      outcomes.set(b.buildingId, {
+        bestStopId,
+        bestStopLabel,
+        bestCustomDistanceMeters,
+        afterBusEffectiveDistanceMeters,
+        afterCoverageRatio,
+        isNewlyCovered,
+        isImprovedGap,
+      });
+    }
+  }
+
+  const perStopStats: CustomStopPerSiteStat[] = stops.map((stop) => ({
+    id: stop.id,
+    label: stop.label,
+    lat: stop.lat,
+    lng: stop.lng,
+    standaloneCoveredBuildings: standaloneCounts.get(stop.id) ?? 0,
+    primaryCoveredBuildings: primaryCounts.get(stop.id) ?? 0,
+  }));
+
+  return {
+    outcomes,
+    summary: {
+      stopCount: stops.length,
+      totalGapBuildingsBefore,
+      newlyCoveredBuildings,
+      newlyCoveredFloorArea,
+      remainingGapBuildings,
+      severeGapBeforeBuildings,
+      severeGapAfterBuildings,
+      improvedGapBuildingsCount,
+      averageImprovedBusBeforeMeters:
+        improvedGapBuildingsCount > 0 ? improvedBusBeforeSum / improvedGapBuildingsCount : null,
+      averageImprovedBusAfterMeters:
+        improvedGapBuildingsCount > 0 ? improvedBusAfterSum / improvedGapBuildingsCount : null,
+      perStopStats,
+    },
+  };
+}
+

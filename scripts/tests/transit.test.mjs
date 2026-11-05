@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const load = createRequire(`${process.env.TRANSIT_TEST_BUILD}/test.cjs`);
 const { TileWorkGate } = load('./async-generation.js');
 const { NetworkRouter } = load('./network-routing.js');
-const { buildGreedyDemandTransitPlan } = load('./transit-analysis.js');
+const { buildGreedyDemandTransitPlan, evaluateCustomStopsSimulation } = load('./transit-analysis.js');
 
 test('old work cannot overwrite a newer generation; duplicate work is suppressed',async()=>{
   const gate=new TileWorkGate(), tile={}; let release; let value=''; let calls=0;
@@ -43,4 +43,51 @@ test('additional sites never worsen access and empty targets are supported',()=>
     assert.ok(results[i].averageAfterMeters <= (i?results[i-1].averageAfterMeters:700));
     assert.ok(results[i].newlyCoveredBuildings <= members.length);
   }
+});
+test('evaluateCustomStopsSimulation aggregates newly covered buildings across multiple custom stops',()=>{
+  const buildings = [
+    { buildingId: 'b1', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 520, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 520 / 300, totalFloorArea: 120 },
+    { buildingId: 'b2', lat: 35.361, lng: 139.451, baseBusEffectiveDistanceMeters: 410, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 410 / 300, totalFloorArea: 80 },
+    { buildingId: 'b3', lat: 35.362, lng: 139.452, baseBusEffectiveDistanceMeters: 180, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 180 / 300, totalFloorArea: 100 },
+  ];
+  const stops = [
+    { id: 1, label: '仮設停留所 #1', lat: 35.36, lng: 139.45 },
+    { id: 2, label: '仮設停留所 #2', lat: 35.361, lng: 139.451 },
+  ];
+  const stopDistanceMap = new Map([
+    [1, new Map([['b1', 210], ['b2', 290]])],
+    [2, new Map([['b2', 140]])],
+  ]);
+  const { outcomes, summary } = evaluateCustomStopsSimulation(buildings, stops, stopDistanceMap, 1);
+  assert.equal(summary.stopCount, 2);
+  assert.equal(summary.totalGapBuildingsBefore, 2);
+  assert.equal(summary.newlyCoveredBuildings, 2);
+  assert.equal(summary.newlyCoveredFloorArea, 200);
+  assert.equal(summary.remainingGapBuildings, 0);
+  assert.equal(summary.severeGapBeforeBuildings, 1);
+  assert.equal(summary.severeGapAfterBuildings, 0);
+  assert.equal(summary.perStopStats[0].standaloneCoveredBuildings, 2);
+  assert.equal(summary.perStopStats[0].primaryCoveredBuildings, 1);
+  assert.equal(summary.perStopStats[1].standaloneCoveredBuildings, 1);
+  assert.equal(summary.perStopStats[1].primaryCoveredBuildings, 1);
+  assert.equal(outcomes.get('b1')?.isNewlyCovered, true);
+  assert.equal(outcomes.get('b1')?.bestStopId, 1);
+  assert.equal(outcomes.get('b2')?.bestStopId, 2);
+  assert.equal(outcomes.get('b2')?.afterBusEffectiveDistanceMeters, 140);
+});
+test('evaluateCustomStopsSimulation respects thresholdMultiplier for custom stop coverage without falsely covering distant gap buildings',()=>{
+  const buildings = [
+    { buildingId: 'nearCustom', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 480, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 480 / 300, totalFloorArea: 100 },
+    { buildingId: 'farFromCustom', lat: 35.37, lng: 139.46, baseBusEffectiveDistanceMeters: 330, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 330 / 300, totalFloorArea: 100 },
+  ];
+  const stops = [{ id: 1, label: '仮設停留所 #1', lat: 35.36, lng: 139.45 }];
+  const stopDistanceMap = new Map([[1, new Map([['nearCustom', 340]])]]);
+  const res10 = evaluateCustomStopsSimulation(buildings, stops, stopDistanceMap, 1.0);
+  assert.equal(res10.summary.newlyCoveredBuildings, 0);
+  assert.equal(res10.outcomes.get('nearCustom')?.isNewlyCovered, false);
+
+  const res12 = evaluateCustomStopsSimulation(buildings, stops, stopDistanceMap, 1.2);
+  assert.equal(res12.summary.newlyCoveredBuildings, 1);
+  assert.equal(res12.outcomes.get('nearCustom')?.isNewlyCovered, true);
+  assert.equal(res12.outcomes.has('farFromCustom'), false);
 });
