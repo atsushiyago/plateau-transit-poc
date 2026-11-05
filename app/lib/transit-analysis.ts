@@ -436,3 +436,131 @@ export function evaluateCustomStopsSimulation(
   };
 }
 
+export type CustomStopExportItem = {
+  id: number;
+  label: string;
+  lat: number;
+  lng: number;
+  standaloneCoveredBuildings?: number;
+  primaryCoveredBuildings?: number;
+};
+
+export type NewlyCoveredBuildingExportItem = {
+  buildingId: string;
+  lat: number;
+  lng: number;
+  usage?: string;
+  totalFloorArea?: number | null;
+  assignedStopLabel?: string;
+  originalNearestStopName?: string;
+  beforeBusEffectiveDistanceMeters: number;
+  afterBusEffectiveDistanceMeters: number;
+  beforeBusWalkMinutes?: number;
+  afterBusWalkMinutes?: number;
+  walkProfileLabel?: string;
+};
+
+export type SimulationGeoJsonFeature = {
+  type: "Feature";
+  geometry: {
+    type: "Point";
+    coordinates: [number, number];
+  };
+  properties: Record<string, string | number | boolean | null>;
+};
+
+export type SimulationGeoJson = {
+  type: "FeatureCollection";
+  name: string;
+  crs: {
+    type: "name";
+    properties: {
+      name: string;
+    };
+  };
+  features: SimulationGeoJsonFeature[];
+};
+
+/**
+ * 停留所自由配置シミュレーション結果（配置した仮設停留所および新規カバー建物）を
+ * QGIS等の一般的なGISソフトで直接取り込めるGeoJSON形式に整形する。
+ */
+export function buildCustomStopSimulationGeoJson(params: {
+  stops: CustomStopExportItem[];
+  newlyCoveredBuildings: NewlyCoveredBuildingExportItem[];
+}): SimulationGeoJson {
+  const features: SimulationGeoJsonFeature[] = [];
+
+  for (const stop of params.stops) {
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [
+          Number(stop.lng.toFixed(6)),
+          Number(stop.lat.toFixed(6)),
+        ],
+      },
+      properties: {
+        feature_type: "custom_stop",
+        stop_id: stop.id,
+        name: stop.label,
+        standalone_covered_buildings: stop.standaloneCoveredBuildings ?? 0,
+        primary_covered_buildings: stop.primaryCoveredBuildings ?? 0,
+      },
+    });
+  }
+
+  for (const b of params.newlyCoveredBuildings) {
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [
+          Number(b.lng.toFixed(6)),
+          Number(b.lat.toFixed(6)),
+        ],
+      },
+      properties: {
+        feature_type: "newly_covered_building",
+        building_id: b.buildingId,
+        usage: b.usage ?? "不明",
+        total_floor_area_sqm:
+          b.totalFloorArea != null && Number.isFinite(b.totalFloorArea)
+            ? Math.round(b.totalFloorArea * 10) / 10
+            : null,
+        assigned_stop: b.assignedStopLabel ?? "",
+        original_bus_stop: b.originalNearestStopName ?? "",
+        before_bus_distance_m: Math.round(b.beforeBusEffectiveDistanceMeters),
+        after_bus_distance_m: Math.round(b.afterBusEffectiveDistanceMeters),
+        reduced_distance_m: Math.max(
+          0,
+          Math.round(b.beforeBusEffectiveDistanceMeters - b.afterBusEffectiveDistanceMeters)
+        ),
+        before_bus_walk_min:
+          b.beforeBusWalkMinutes != null
+            ? Math.round(b.beforeBusWalkMinutes * 10) / 10
+            : null,
+        after_bus_walk_min:
+          b.afterBusWalkMinutes != null
+            ? Math.round(b.afterBusWalkMinutes * 10) / 10
+            : null,
+        walk_profile: b.walkProfileLabel ?? null,
+      },
+    });
+  }
+
+  return {
+    type: "FeatureCollection",
+    name: "plateau_custom_stop_simulation",
+    crs: {
+      type: "name",
+      properties: {
+        name: "urn:ogc:def:crs:OGC:1.3:CRS84",
+      },
+    },
+    features,
+  };
+}
+
+

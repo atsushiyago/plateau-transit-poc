@@ -1,6 +1,6 @@
 "use client";
 
-import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, evaluateCustomStopsSimulation, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite, type CustomStopSite, type CustomStopSimulationSummary, type CustomStopBuildingRecord } from "./lib/transit-analysis";
+import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, evaluateCustomStopsSimulation, buildCustomStopSimulationGeoJson, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite, type CustomStopSite, type CustomStopSimulationSummary, type CustomStopBuildingRecord, type CustomStopExportItem, type NewlyCoveredBuildingExportItem } from "./lib/transit-analysis";
 import { NetworkRouter, type RoutingGraph } from "./lib/network-routing";
 import { TileWorkGate } from "./lib/async-generation";
 import type { AnalysisResponse } from "./workers/transit-analysis.worker";
@@ -992,6 +992,7 @@ function CustomStopSimulationPanel({
   onClearStops,
   onRemoveStop,
   onFlyToStop,
+  onExportGeoJson,
 }: {
   isVisible: boolean;
   isAddingCustomStop: boolean;
@@ -1003,6 +1004,7 @@ function CustomStopSimulationPanel({
   onClearStops: () => void;
   onRemoveStop: (id: number) => void;
   onFlyToStop: (id: number) => void;
+  onExportGeoJson?: () => void;
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   if (!isVisible) return null;
@@ -1179,6 +1181,32 @@ function CustomStopSimulationPanel({
                         </div>
                       )}
                   </div>
+                )}
+                {onExportGeoJson && (
+                  <button
+                    type="button"
+                    onClick={onExportGeoJson}
+                    title="配置した仮設停留所と新規カバー建物をGeoJSON形式でダウンロードします（QGIS等で開けます）"
+                    style={{
+                      marginTop: 8,
+                      width: "100%",
+                      padding: "6px 10px",
+                      fontSize: 11.5,
+                      fontWeight: "bold",
+                      borderRadius: 4,
+                      border: "1px solid rgba(56, 189, 248, 0.6)",
+                      background: "rgba(2, 132, 199, 0.35)",
+                      color: "#e0f2fe",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <span>📥</span>
+                    <span>シミュレーション結果を出力 (GeoJSON)</span>
+                  </button>
                 )}
               </div>
 
@@ -1717,6 +1745,11 @@ export default function PlateauViewer() {
   const clearCustomStopsRef = useRef<(() => void) | null>(null);
   const flyToCustomStopRef = useRef<((id: number) => void) | null>(null);
   const reapplyCustomStopScoresRef = useRef<(() => void) | null>(null);
+  const exportCustomStopSimulationGeoJsonRef = useRef<(() => void) | null>(null);
+  const customStopSummaryRef = useRef<CustomStopSimulationSummary | null>(null);
+  useEffect(() => {
+    customStopSummaryRef.current = customStopSummary;
+  }, [customStopSummary]);
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -2071,6 +2104,7 @@ export default function PlateauViewer() {
             cached.info = cached.baseInfo;
           }
           setCustomStopSummary(null);
+          customStopSummaryRef.current = null;
           refreshLoadedTileFeatureColors();
           return;
         }
@@ -2130,6 +2164,7 @@ export default function PlateauViewer() {
         }
 
         setCustomStopSummary(summary);
+        customStopSummaryRef.current = summary;
         refreshLoadedTileFeatureColors();
       }
 
@@ -2361,11 +2396,68 @@ export default function PlateauViewer() {
         });
       }
 
+      function exportCustomStopSimulationGeoJson() {
+        if (customStops.length === 0) return;
+
+        const stopExportItems: CustomStopExportItem[] = customStops.map((stop) => {
+          const stat = customStopSummaryRef.current?.perStopStats.find((s) => s.id === stop.id);
+          return {
+            id: stop.id,
+            label: stop.label,
+            lat: stop.lat,
+            lng: stop.lng,
+            standaloneCoveredBuildings: stat?.standaloneCoveredBuildings ?? 0,
+            primaryCoveredBuildings: stat?.primaryCoveredBuildings ?? 0,
+          };
+        });
+
+        const newlyCoveredBuildings: NewlyCoveredBuildingExportItem[] = [];
+        for (const [buildingId, cached] of buildingScoreCache) {
+          if (cached.info.customStopImprovement?.isNewlyCovered) {
+            const imp = cached.info.customStopImprovement;
+            newlyCoveredBuildings.push({
+              buildingId,
+              lat: cached.baseInfo.lat,
+              lng: cached.baseInfo.lng,
+              usage: cached.baseInfo.usage,
+              totalFloorArea: cached.baseInfo.totalFloorArea,
+              assignedStopLabel: imp.stopLabel,
+              originalNearestStopName: cached.baseInfo.nearestStopName,
+              beforeBusEffectiveDistanceMeters: cached.baseInfo.busEffectiveDistanceMeters,
+              afterBusEffectiveDistanceMeters: imp.afterBusEffectiveDistanceMeters,
+              beforeBusWalkMinutes: cached.baseInfo.busWalkMinutes,
+              afterBusWalkMinutes: imp.afterBusWalkMinutes,
+              walkProfileLabel: cached.baseInfo.walkProfileLabel,
+            });
+          }
+        }
+
+        const geoJson = buildCustomStopSimulationGeoJson({
+          stops: stopExportItems,
+          newlyCoveredBuildings,
+        });
+
+        const jsonStr = JSON.stringify(geoJson, null, 2);
+        const blob = new Blob([jsonStr], { type: "application/geo+json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        a.href = url;
+        a.download = `plateau_simulation_${timestamp}.geojson`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
       removeCustomStopRef.current = removeCustomStop;
       undoLastCustomStopRef.current = undoLastCustomStop;
       clearCustomStopsRef.current = clearCustomStops;
       flyToCustomStopRef.current = flyToCustomStop;
       reapplyCustomStopScoresRef.current = reapplyCustomStopScoresToBuildings;
+      exportCustomStopSimulationGeoJsonRef.current = exportCustomStopSimulationGeoJson;
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
@@ -3130,6 +3222,7 @@ export default function PlateauViewer() {
       clearCustomStopsRef.current = null;
       flyToCustomStopRef.current = null;
       reapplyCustomStopScoresRef.current = null;
+      exportCustomStopSimulationGeoJsonRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -3227,6 +3320,7 @@ export default function PlateauViewer() {
         }}
         onRemoveStop={(id) => removeCustomStopRef.current?.(id)}
         onFlyToStop={(id) => flyToCustomStopRef.current?.(id)}
+        onExportGeoJson={() => exportCustomStopSimulationGeoJsonRef.current?.()}
       />
       {analysisError && <div role="alert" style={{position:'absolute',right:12,top:12,zIndex:20,maxWidth:360,padding:12,background:'#7f1d1d',color:'white'}}>{analysisError}<button onClick={()=>setAnalysisError(null)} aria-label="通知を閉じる">×</button></div>}
       <UncoloredBuildingsNote />

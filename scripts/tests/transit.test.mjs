@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const load = createRequire(`${process.env.TRANSIT_TEST_BUILD}/test.cjs`);
 const { TileWorkGate } = load('./async-generation.js');
 const { NetworkRouter } = load('./network-routing.js');
-const { buildGreedyDemandTransitPlan, evaluateCustomStopsSimulation } = load('./transit-analysis.js');
+const { buildGreedyDemandTransitPlan, evaluateCustomStopsSimulation, buildCustomStopSimulationGeoJson } = load('./transit-analysis.js');
 
 test('old work cannot overwrite a newer generation; duplicate work is suppressed',async()=>{
   const gate=new TileWorkGate(), tile={}; let release; let value=''; let calls=0;
@@ -91,3 +91,52 @@ test('evaluateCustomStopsSimulation respects thresholdMultiplier for custom stop
   assert.equal(res12.outcomes.get('nearCustom')?.isNewlyCovered, true);
   assert.equal(res12.outcomes.has('farFromCustom'), false);
 });
+
+test('buildCustomStopSimulationGeoJson creates valid GeoJSON with stops and newly covered buildings',()=>{
+  const geojson = buildCustomStopSimulationGeoJson({
+    stops: [
+      { id: 1, label: '仮設停留所 #1', lat: 35.3600001, lng: 139.4500002, standaloneCoveredBuildings: 10, primaryCoveredBuildings: 8 },
+    ],
+    newlyCoveredBuildings: [
+      {
+        buildingId: 'bldg_001',
+        lat: 35.3610001,
+        lng: 139.4510002,
+        usage: '共同住宅',
+        totalFloorArea: 245.5,
+        assignedStopLabel: '仮設停留所 #1',
+        originalNearestStopName: '遠い既存バス停',
+        beforeBusEffectiveDistanceMeters: 550.2,
+        afterBusEffectiveDistanceMeters: 210.4,
+        beforeBusWalkMinutes: 7.0,
+        afterBusWalkMinutes: 2.6,
+        walkProfileLabel: '高齢者（坂道の負荷係数2倍）',
+      },
+    ],
+  });
+
+  assert.equal(geojson.type, 'FeatureCollection');
+  assert.equal(geojson.features.length, 2);
+
+  const stopFeature = geojson.features[0];
+  assert.equal(stopFeature.geometry.type, 'Point');
+  assert.deepEqual(stopFeature.geometry.coordinates, [139.45, 35.36]);
+  assert.equal(stopFeature.properties.feature_type, 'custom_stop');
+  assert.equal(stopFeature.properties.name, '仮設停留所 #1');
+  assert.equal(stopFeature.properties.standalone_covered_buildings, 10);
+  assert.equal(stopFeature.properties.primary_covered_buildings, 8);
+
+  const bldgFeature = geojson.features[1];
+  assert.equal(bldgFeature.geometry.type, 'Point');
+  assert.deepEqual(bldgFeature.geometry.coordinates, [139.451, 35.361]);
+  assert.equal(bldgFeature.properties.feature_type, 'newly_covered_building');
+  assert.equal(bldgFeature.properties.building_id, 'bldg_001');
+  assert.equal(bldgFeature.properties.usage, '共同住宅');
+  assert.equal(bldgFeature.properties.total_floor_area_sqm, 245.5);
+  assert.equal(bldgFeature.properties.assigned_stop, '仮設停留所 #1');
+  assert.equal(bldgFeature.properties.before_bus_distance_m, 550);
+  assert.equal(bldgFeature.properties.after_bus_distance_m, 210);
+  assert.equal(bldgFeature.properties.reduced_distance_m, 340);
+  assert.equal(bldgFeature.properties.walk_profile, '高齢者（坂道の負荷係数2倍）');
+});
+
