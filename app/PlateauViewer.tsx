@@ -306,7 +306,7 @@ type ExistingDemandTransitService = {
   sourceUrl: string;
   stops: ExistingDemandTransitStop[];
 };
-const EXISTING_DEMAND_TRANSIT_COLOR = Cesium.Color.fromCssColorString("#3b82f6");
+const EXISTING_DEMAND_TRANSIT_COLOR = Cesium.Color.fromCssColorString("#a855f7");
 
 // ハローサイクリング（OpenStreet株式会社）のシェアサイクルステーションを地図上に表示する。
 // データ出典: ODPT（公共交通オープンデータセンター）のGBFS形式データ。GTFS-JPと違い
@@ -755,12 +755,12 @@ function Legend({
             width: 12,
             height: 12,
             borderRadius: "50%",
-            background: CUSTOM_STOP_PIN_COLOR_HEX,
-            border: "1.5px solid #ffffff",
+            background: EXISTING_DEMAND_TRANSIT_COLOR.toCssColorString(),
+            border: "1px solid rgba(255,255,255,0.6)",
             flexShrink: 0,
           }}
         />
-        <span>仮設停留所（地図クリックで自由配置）</span>
+        <span>乗合タクシー等（藤沢市が既に運行中）</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
         <span
@@ -769,12 +769,12 @@ function Legend({
             width: 12,
             height: 12,
             borderRadius: "50%",
-            background: EXISTING_DEMAND_TRANSIT_COLOR.toCssColorString(),
-            border: "1px solid rgba(255,255,255,0.6)",
+            background: CUSTOM_STOP_PIN_COLOR_HEX,
+            border: "1.5px solid #ffffff",
             flexShrink: 0,
           }}
         />
-        <span>乗合タクシー等（藤沢市が既に運行中）</span>
+        <span>仮設停留所（地図クリックで自由配置）</span>
       </div>
       {SHOW_HELLO_CYCLING_UI && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
