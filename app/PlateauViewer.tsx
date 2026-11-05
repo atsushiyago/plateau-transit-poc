@@ -511,6 +511,8 @@ function Legend({
   isAddingCustomStop,
   customStopCount,
   customStopNewlyCoveredCount,
+  isCollapsed,
+  onToggleCollapsed,
   onToggleAddingCustomStop,
   onClearCustomStops,
 }: {
@@ -535,10 +537,11 @@ function Legend({
   isAddingCustomStop: boolean;
   customStopCount: number;
   customStopNewlyCoveredCount: number;
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
   onToggleAddingCustomStop: () => void;
   onClearCustomStops: () => void;
 }) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
   // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
   // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
   const [experimentalHeaderHovered, setExperimentalHeaderHovered] = useState(false);
@@ -571,13 +574,23 @@ function Legend({
     >
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: isCollapsed ? 0 : 4 }}>
         <div
-          onClick={() => setIsCollapsed((prev) => !prev)}
+          onClick={onToggleCollapsed}
           style={{ cursor: "pointer", flex: 1, userSelect: "none" }}
         >
           <div style={{ fontWeight: "bold", fontSize: 13 }}>藤沢市の距離基準を参考にした独自推計</div>
           {isCollapsed && (
-            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
-              クリックまたは右のボタンで凡例と設定を展開
+            <div
+              style={{
+                fontSize: 11,
+                color: isAddingCustomStop || customStopCount > 0 ? "#38bdf8" : "#94a3b8",
+                marginTop: 2,
+              }}
+            >
+              {isAddingCustomStop
+                ? "📍 停留所配置中（凡例・設定を展開）"
+                : customStopCount > 0
+                ? "📊 シミュレーション結果表示中（凡例・設定を展開）"
+                : "クリックまたは右のボタンで凡例と設定を展開"}
             </div>
           )}
         </div>
@@ -585,7 +598,7 @@ function Legend({
           type="button"
           aria-label={isCollapsed ? "凡例パネルを展開" : "凡例パネルを折りたたむ"}
           title={isCollapsed ? "展開する" : "折りたたむ"}
-          onClick={() => setIsCollapsed((prev) => !prev)}
+          onClick={onToggleCollapsed}
           style={{
             border: "1px solid rgba(148, 163, 184, 0.4)",
             borderRadius: 4,
@@ -992,6 +1005,7 @@ function CustomStopSimulationPanel({
   onRemoveStop,
   onFlyToStop,
   onExportGeoJson,
+  onClose,
 }: {
   isVisible: boolean;
   isAddingCustomStop: boolean;
@@ -1003,6 +1017,7 @@ function CustomStopSimulationPanel({
   onRemoveStop: (id: number) => void;
   onFlyToStop: (id: number) => void;
   onExportGeoJson?: () => void;
+  onClose: () => void;
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   if (!isVisible) return null;
@@ -1058,26 +1073,45 @@ function CustomStopSimulationPanel({
             </div>
           )}
         </div>
-        <button
-          type="button"
-          aria-label={isCollapsed ? "パネルを展開" : "パネルを折りたたむ"}
-          title={isCollapsed ? "展開する" : "折りたたむ"}
-          onClick={() => setIsCollapsed((prev) => !prev)}
-          style={{
-            border: "1px solid rgba(148, 163, 184, 0.4)",
-            borderRadius: 4,
-            background: "rgba(255, 255, 255, 0.08)",
-            color: "#cbd5e1",
-            fontSize: 11,
-            lineHeight: 1,
-            cursor: "pointer",
-            padding: "4px 6px",
-            whiteSpace: "nowrap",
-            flexShrink: 0,
-          }}
-        >
-          {isCollapsed ? "▼ 展開" : "▲ 縮小"}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          <button
+            type="button"
+            aria-label={isCollapsed ? "パネルを展開" : "パネルを折りたたむ"}
+            title={isCollapsed ? "展開する" : "折りたたむ"}
+            onClick={() => setIsCollapsed((prev) => !prev)}
+            style={{
+              border: "1px solid rgba(148, 163, 184, 0.4)",
+              borderRadius: 4,
+              background: "rgba(255, 255, 255, 0.08)",
+              color: "#cbd5e1",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: "4px 6px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isCollapsed ? "▼ 展開" : "▲ 縮小"}
+          </button>
+          <button
+            type="button"
+            aria-label="シミュレーションを終了して閉じる"
+            title="シミュレーションを終了して閉じる"
+            onClick={onClose}
+            style={{
+              border: "1px solid rgba(148, 163, 184, 0.4)",
+              borderRadius: 4,
+              background: "rgba(255, 255, 255, 0.08)",
+              color: "#cbd5e1",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: "4px 6px",
+            }}
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       {!isCollapsed && (
@@ -1098,7 +1132,7 @@ function CustomStopSimulationPanel({
                 cursor: "pointer",
               }}
             >
-              {isAddingCustomStop ? "📍 地図クリックで追加中（終了する）" : "＋ 地図クリックで停留所を追加"}
+              {isAddingCustomStop ? "📍 ピン配置モード中（配置を完了する）" : "＋ 地図クリックで停留所を追加"}
             </button>
           </div>
 
@@ -1114,7 +1148,7 @@ function CustomStopSimulationPanel({
                 fontSize: 11.5,
               }}
             >
-              地図上の設置したい場所（道路沿いや赤い空白地の中）をクリックすると、停留所ピン（#1, #2…）が追加され、新たにカバーされる建物が<b style={{ color: "#38bdf8" }}>水色</b>に変わります。
+              地図上の設置したい場所（道路沿いや赤い空白地の中）をクリックすると、停留所ピン（#1, #2…）が追加され、新たにカバーされる建物が<b style={{ color: "#38bdf8" }}>水色</b>に変わります。配置が終わったら上のボタンで完了してください。
             </div>
           )}
 
@@ -1673,6 +1707,7 @@ export default function PlateauViewer() {
   const [isDemandTransitPanelVisible, setIsDemandTransitPanelVisible] = useState(false);
   // 任意地点の停留所自由配置シミュレーション用のstate。
   const [isAddingCustomStop, setIsAddingCustomStop] = useState(false);
+  const [isLegendCollapsed, setIsLegendCollapsed] = useState(false);
   const [isEvaluatingCustomStops, setIsEvaluatingCustomStops] = useState(false);
   const [customStopSummary, setCustomStopSummary] = useState<CustomStopSimulationSummary | null>(null);
   // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
@@ -3279,9 +3314,23 @@ export default function PlateauViewer() {
         isAddingCustomStop={isAddingCustomStop}
         customStopCount={customStopSummary?.stopCount ?? 0}
         customStopNewlyCoveredCount={customStopSummary?.newlyCoveredBuildings ?? 0}
-        onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
+        isCollapsed={isLegendCollapsed}
+        onToggleCollapsed={() => setIsLegendCollapsed((prev) => !prev)}
+        onToggleAddingCustomStop={() => {
+          setIsAddingCustomStop((prev) => {
+            const next = !prev;
+            if (next) {
+              setIsLegendCollapsed(true);
+            } else if ((customStopSummary?.stopCount ?? 0) === 0) {
+              setIsLegendCollapsed(false);
+            }
+            return next;
+          });
+        }}
         onClearCustomStops={() => {
+          setIsAddingCustomStop(false);
           clearCustomStopsRef.current?.();
+          setIsLegendCollapsed(false);
         }}
       />
       <CustomStopSimulationPanel
@@ -3292,14 +3341,28 @@ export default function PlateauViewer() {
         analysisThresholdMultiplier={
           distanceModel === "network" ? networkThresholdMultiplier : demandTransitAnalysisThresholdMultiplier
         }
-        onToggleAddingCustomStop={() => setIsAddingCustomStop((prev) => !prev)}
+        onToggleAddingCustomStop={() => {
+          setIsAddingCustomStop((prev) => {
+            const next = !prev;
+            if (!next && (customStopSummary?.stopCount ?? 0) === 0) {
+              setIsLegendCollapsed(false);
+            }
+            return next;
+          });
+        }}
         onClearStops={() => {
           setIsAddingCustomStop(true);
           clearCustomStopsRef.current?.();
+          setIsLegendCollapsed(true);
         }}
         onRemoveStop={(id) => removeCustomStopRef.current?.(id)}
         onFlyToStop={(id) => flyToCustomStopRef.current?.(id)}
         onExportGeoJson={() => exportCustomStopSimulationGeoJsonRef.current?.()}
+        onClose={() => {
+          setIsAddingCustomStop(false);
+          clearCustomStopsRef.current?.();
+          setIsLegendCollapsed(false);
+        }}
       />
       {analysisError && <div role="alert" style={{position:'absolute',right:12,top:12,zIndex:20,maxWidth:360,padding:12,background:'#7f1d1d',color:'white'}}>{analysisError}<button onClick={()=>setAnalysisError(null)} aria-label="通知を閉じる">×</button></div>}
       <UncoloredBuildingsNote />
