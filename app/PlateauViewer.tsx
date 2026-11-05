@@ -538,6 +538,7 @@ function Legend({
   onToggleAddingCustomStop: () => void;
   onClearCustomStops: () => void;
 }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
   // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
   // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
   const [experimentalHeaderHovered, setExperimentalHeaderHovered] = useState(false);
@@ -568,10 +569,44 @@ function Legend({
         overflowY: "auto",
       }}
     >
-      <div style={{ fontWeight: "bold", marginBottom: 4 }}>藤沢市の距離基準を参考にした独自推計</div>
-      <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-        鉄道駅600m／バス停300mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: isCollapsed ? 0 : 4 }}>
+        <div
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          style={{ cursor: "pointer", flex: 1, userSelect: "none" }}
+        >
+          <div style={{ fontWeight: "bold", fontSize: 13 }}>藤沢市の距離基準を参考にした独自推計</div>
+          {isCollapsed && (
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+              クリックまたは右のボタンで凡例と設定を展開
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          aria-label={isCollapsed ? "凡例パネルを展開" : "凡例パネルを折りたたむ"}
+          title={isCollapsed ? "展開する" : "折りたたむ"}
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          style={{
+            border: "1px solid rgba(148, 163, 184, 0.4)",
+            borderRadius: 4,
+            background: "rgba(255, 255, 255, 0.08)",
+            color: "#cbd5e1",
+            fontSize: 11,
+            lineHeight: 1,
+            cursor: "pointer",
+            padding: "4px 6px",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+          }}
+        >
+          {isCollapsed ? "▼ 展開" : "▲ 縮小"}
+        </button>
       </div>
+      {!isCollapsed && (
+        <>
+          <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
+            鉄道駅600m／バス停300mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
+          </div>
       {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
           <span
@@ -938,6 +973,8 @@ function Legend({
             <span>ハローサイクリング ステーションを表示</span>
           </label>
         </div>
+      )}
+        </>
       )}
     </div>
   );
