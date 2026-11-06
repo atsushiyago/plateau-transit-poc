@@ -1,6 +1,37 @@
 "use client";
 
-import { WALK_PROFILES, DISTANCE_MODEL_DEFAULT, haversineMeters, projectToLocalMeters, unprojectFromLocalMeters, kMeans, BUILDING_NETWORK_SCORES_JSON_URL, evaluateCustomStopsSimulation, buildCustomStopSimulationGeoJson, type WalkProfile, type DistanceModel, type BuildingNetworkScoreRow, type DemandTransitPlanAnalysis, type DemandTransitMember, type DemandTransitPlanSite, type CustomStopSite, type CustomStopSimulationSummary, type CustomStopBuildingRecord, type CustomStopExportItem, type NewlyCoveredBuildingExportItem } from "./lib/transit-analysis";
+import {
+  WALK_PROFILES,
+  DISTANCE_MODEL_DEFAULT,
+  haversineMeters,
+  projectToLocalMeters,
+  unprojectFromLocalMeters,
+  kMeans,
+  BUILDING_NETWORK_SCORES_JSON_URL,
+  evaluateCustomStopsSimulation,
+  buildCustomStopSimulationGeoJson,
+  MOBILITY_HUB_CANDIDATES,
+  MOBILITY_HUB_MODES,
+  evaluateMobilityHubSimulation,
+  buildMobilityHubSimulationGeoJson,
+  type WalkProfile,
+  type DistanceModel,
+  type BuildingNetworkScoreRow,
+  type DemandTransitPlanAnalysis,
+  type DemandTransitMember,
+  type DemandTransitPlanSite,
+  type CustomStopSite,
+  type CustomStopSimulationSummary,
+  type CustomStopBuildingRecord,
+  type CustomStopExportItem,
+  type NewlyCoveredBuildingExportItem,
+  type MobilityHubSite,
+  type MobilityHubMode,
+  type MobilityHubSiteConfig,
+  type MobilityHubSimulationSummary,
+  type MobilityHubBuildingRecord,
+  type MobilityHubCoveredBuildingExportItem,
+} from "./lib/transit-analysis";
 import { NetworkRouter, type RoutingGraph } from "./lib/network-routing";
 import { TileWorkGate } from "./lib/async-generation";
 import type { AnalysisResponse } from "./workers/transit-analysis.worker";
@@ -71,13 +102,13 @@ type BusStop = { name: string; lat: number; lng: number; operator: string; route
 // 分析用施設はanalysis-facilities.json。市境・東海道線で利用先を切らない。
 type TrainStation = { name: string; lat: number; lng: number };
 
-// 藤沢市公式の「交通空白地」定義（メンター自治体への質問への回答で確認済み、2026年8月）:
-// 「鉄道駅から600m圏、バス停から300m圏（高齢者の移動を考慮した基準）に入らないエリア」。
+// 藤沢市公式の「交通空白地」定義（メンター自治体との協議に基づき、バス停400m・鉄道駅800mの基準に変更）:
+// 「鉄道駅から800m圏、バス停から400m圏（徒歩10分／5分を考慮した基準）に入らないエリア」。
 // このPoCでは傾斜込みの実効距離をこの2つの閾値と比較し、どちらか一方でも満たせば
 // 「カバーされている」と判定する（OR条件）。詳細はAGENTS.md「藤沢市の距離基準を参考にした独自推計への
 // 切替について」参照。
-const STATION_COVERAGE_THRESHOLD_METERS = 600;
-const BUS_COVERAGE_THRESHOLD_METERS = 300;
+const STATION_COVERAGE_THRESHOLD_METERS = 800;
+const BUS_COVERAGE_THRESHOLD_METERS = 400;
 
 // 藤沢市内でJR東海道本線はほぼ東西に走っているため、経度ごとに路線の緯度を線形補間し、
 // 建物の緯度がそれを上回れば「北側」と判定する簡易ロジック（バス停データの北部抽出時と同じ考え方。
@@ -121,14 +152,14 @@ const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 // mainとブランチを行き来せず同じ画面上で比較できるよう追加した（あくまで視覚比較用の一時的な
 // 実装であり、本採用するかどうかは別途判断する）。
 // 【feature/road-network-distanceブランチ限定・実験的】道路網距離は直線距離より系統的に長くなる
-// ため、直線距離モデルと同じ300m/600mの閾値をそのまま道路網距離に適用すると判定が「厳しすぎる」
+// ため、直線距離モデルと同じ400m/800mの閾値をそのまま道路網距離に適用すると判定が「厳しすぎる」
 // のでは、という丹野氏からの指摘（2026年8月）を受けて追加。道路網距離モデルの閾値にだけ
 // 調整可能な倍率をかけられるようにする（直線距離モデルは藤沢市公式定義との比較用の
-// ベースラインとして、常に固定の300m/600mのまま変更しない）。
+// ベースラインとして、常に固定の400m/800mのまま変更しない）。
 const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.2;
 
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
-// STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（300m/600m）が異なる駅・バスの2つの基準を
+// STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（400m/800m）が異なる駅・バスの2つの基準を
 // ORで比較するための正規化で、ratio<=1ならどちらか一方の基準を満たす＝「カバーされている」。
 // 【2026年8月・3段階に統合】当初はratio>1の超過分を赤系4段階（僅かに超過/やや遠い/遠い/
 // 非常に遠い）に分けていたが、実データで集計したところ「やや遠い」「遠い」に該当する建物は
@@ -199,6 +230,13 @@ type BuildingScoreInfo = {
     afterCoverageRatio: number;
     isNewlyCovered: boolean;
   };
+  mobilityHubImprovement?: {
+    hubId: number;
+    hubName: string;
+    hubAddress: string;
+    hubDistanceMeters: number;
+    modeLabel: string;
+  };
 };
 
 // 乗り場増設案の比較結果。候補地点を一つずつクリックしなくても、追加数ごとの
@@ -255,7 +293,7 @@ async function computeEffectiveDistances(
 // 分かりにくくなるため廃止した。
 const DEMAND_TRANSIT_GAP_RATIO_THRESHOLD = 1.0;
 const DEMAND_TRANSIT_CLUSTER_COUNT_DEFAULT = 4;
-// 比較分析では、実効距離に対してバス300m・駅600mをそのまま適用するか、坂道等による
+// 比較分析では、実効距離に対してバス400m・駅800mをそのまま適用するか、坂道等による
 // 上乗せを見込んで何倍まで許容するかを別途選べるようにする。これは地図の独自推計を
 // 変えるものではなく、乗り場追加案の感度分析専用の条件である。
 // 徒歩経路の一般的な迂回率（約1.2）を、比較分析の初期条件に採用する。
@@ -412,6 +450,35 @@ function createCustomStopPinIconDataUrl(
   return canvas.toDataURL();
 }
 
+// モビリティ・ハブ候補地ピン（アンバー/オレンジ系の丸＋白いH1〜H4テキスト）をcanvasで生成する。
+const MOBILITY_HUB_PIN_COLOR_HEX = "#f59e0b";
+function createMobilityHubPinIconDataUrl(
+  hubId: number,
+  fillColor = MOBILITY_HUB_PIN_COLOR_HEX,
+  size = 32
+): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const center = size / 2;
+  const radius = size / 2 - 3;
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 13px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(`H${hubId}`, center, center + 1);
+  return canvas.toDataURL();
+}
+
 // 画面上のクリック位置から地形表面（未ロード時は楕円体表面）の緯度経度を取得する。
 // viewer.scene.pickPositionは3D Tilesの建物屋根を拾ったり深度設定で空振りすることがあるため、
 // camera.getPickRay + globe.pick を優先し、フォールバックに pickEllipsoid を使う。
@@ -511,6 +578,10 @@ function Legend({
   isAddingCustomStop,
   customStopCount,
   customStopNewlyCoveredCount,
+  isMobilityHubActive,
+  onToggleMobilityHubActive,
+  mobilityHubRescuedCount,
+  mobilityHubRescuedArea,
   isCollapsed,
   onToggleCollapsed,
   onToggleAddingCustomStop,
@@ -537,6 +608,10 @@ function Legend({
   isAddingCustomStop: boolean;
   customStopCount: number;
   customStopNewlyCoveredCount: number;
+  isMobilityHubActive: boolean;
+  onToggleMobilityHubActive: () => void;
+  mobilityHubRescuedCount?: number;
+  mobilityHubRescuedArea?: number;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   onToggleAddingCustomStop: () => void;
@@ -568,7 +643,7 @@ function Legend({
         // 広がってしまう不具合が実際に発生した。他のパネル（InfoPopup/CoverageStatsPanel）と
         // 同様にmaxWidthで頭打ちにしておく。
         maxWidth: 320,
-        maxHeight: "calc(100vh - 250px)",
+        maxHeight: "calc(100vh - 32px)",
         overflowY: "auto",
       }}
     >
@@ -618,7 +693,7 @@ function Legend({
       {!isCollapsed && (
         <>
           <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-            鉄道駅600m／バス停300mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
+            鉄道駅800m／バス停400mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
           </div>
       {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
@@ -648,6 +723,23 @@ function Legend({
         />
         <span>新規カバー（自由配置した停留所で解消）</span>
       </div>
+      {isMobilityHubActive && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 14,
+              height: 14,
+              background: MOBILITY_HUB_PIN_COLOR_HEX,
+              border: "1px solid rgba(255,255,255,0.6)",
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ color: "#fbbf24", fontWeight: "bold" }}>
+            モビリティ・ハブ救済（オレンジ）
+          </span>
+        </div>
+      )}
       <div style={{ marginTop: 4 }}>
         <div style={{ opacity: 0.85, marginBottom: 2 }}>勾配・歩行速度のプロファイル:</div>
         {(Object.keys(WALK_PROFILES) as WalkProfile[]).map((key) => (
@@ -746,7 +838,7 @@ function Legend({
                 style={{ width: "100%" }}
               />
               <div style={{ fontSize: 10.5, opacity: 0.75, marginTop: 2 }}>
-                道路網距離は直線距離より系統的に長くなるため、駅600m・バス300mの参考基準にこの倍率をかけて判定を緩和できます（直線距離モデルは300m／600mの閾値で固定）。
+                道路網距離は直線距離より系統的に長くなるため、駅800m・バス400mの参考基準にこの倍率をかけて判定を緩和できます（直線距離モデルは400m／800mの閾値で固定）。
               </div>
             </div>
           </>
@@ -935,9 +1027,61 @@ function Legend({
           <div style={{ fontSize: 10.5, opacity: 0.82, marginTop: 2 }}>
             {distanceModel === "network"
               ? "道路網距離モデル選択中は、道路網の判定緩和倍率と自動で同期します。"
-              : "傾斜補正込みで300m圏は厳しい場合などに緩和できます。変更すると水色のカバー範囲が即座に更新されます。"}
+              : "傾斜補正込みで400m圏は厳しい場合などに緩和できます。変更すると水色のカバー範囲が即座に更新されます。"}
           </div>
         </div>
+      </div>
+      <div
+        style={{
+          marginTop: 10,
+          padding: "9px 10px",
+          borderRadius: 6,
+          background: isMobilityHubActive
+            ? "linear-gradient(180deg, rgba(245, 158, 11, 0.28) 0%, rgba(217, 119, 6, 0.2) 100%)"
+            : "linear-gradient(180deg, rgba(245, 158, 11, 0.16) 0%, rgba(15, 23, 42, 0.5) 100%)",
+          border: isMobilityHubActive
+            ? "2px solid #f59e0b"
+            : "1.5px solid #d97706",
+          boxShadow: isMobilityHubActive
+            ? "0 0 12px rgba(245, 158, 11, 0.45)"
+            : "0 2px 8px rgba(217, 119, 6, 0.25)",
+        }}
+      >
+        <div style={{ fontWeight: "bold", color: "#fbbf24", fontSize: 12.5, letterSpacing: "0.02em" }}>
+          🚲 モビリティ・ハブ検討（実証候補地）
+        </div>
+        <div style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 3 }}>
+          藤沢市が実証検討中の候補地4箇所（大庭・遠藤）にシェアサイクル等を導入した場合の救済効果を試算します。
+        </div>
+        <button
+          type="button"
+          onClick={onToggleMobilityHubActive}
+          style={{
+            width: "100%",
+            marginTop: 7,
+            padding: "7px 8px",
+            border: isMobilityHubActive ? "1.5px solid #fef3c7" : "1px solid #f59e0b",
+            borderRadius: 4,
+            background: isMobilityHubActive
+              ? "linear-gradient(180deg, #d97706 0%, #b45309 100%)"
+              : "linear-gradient(180deg, rgba(217, 119, 6, 0.7) 0%, rgba(180, 83, 9, 0.7) 100%)",
+            color: "#fff",
+            fontWeight: "bold",
+            fontSize: 12,
+            cursor: "pointer",
+            boxShadow: isMobilityHubActive ? "0 0 8px rgba(245, 158, 11, 0.6)" : "none",
+          }}
+        >
+          {isMobilityHubActive ? "🚲 ハブ検討中（パネルを表示中）" : "🚲 モビリティ・ハブ検討を開始"}
+        </button>
+        {isMobilityHubActive && mobilityHubRescuedCount != null && mobilityHubRescuedCount > 0 && (
+          <div style={{ marginTop: 6, fontSize: 11, color: "#fef3c7" }}>
+            救済効果: <b style={{ color: "#fbbf24" }}>+{mobilityHubRescuedCount.toLocaleString()}棟</b>
+            {mobilityHubRescuedArea != null && mobilityHubRescuedArea > 0 && (
+              <span>（延床 約{Math.round(mobilityHubRescuedArea).toLocaleString()}m²）</span>
+            )}
+          </div>
+        )}
       </div>
       {SHOW_AUTO_CANDIDATE_AND_COMPARISON_UI && (
         <>
@@ -1335,6 +1479,438 @@ function CustomStopSimulationPanel({
   );
 }
 
+// モビリティ・ハブ実証検討シミュレーション用パネル（画面右上に表示）。
+function MobilityHubSimulationPanel({
+  isVisible,
+  selectedMode,
+  minMeters,
+  maxMeters,
+  activeHubIds,
+  hubModes,
+  summary,
+  onSelectMode,
+  onChangeMinMeters,
+  onChangeMaxMeters,
+  onToggleHub,
+  onUpdateHubMode,
+  onFlyToHub,
+  onExportGeoJson,
+  onClose,
+}: {
+  isVisible: boolean;
+  selectedMode: MobilityHubMode;
+  minMeters: number;
+  maxMeters: number;
+  activeHubIds: number[];
+  hubModes: Record<number, MobilityHubMode>;
+  summary: MobilityHubSimulationSummary | null;
+  onSelectMode: (mode: MobilityHubMode) => void;
+  onChangeMinMeters: (val: number) => void;
+  onChangeMaxMeters: (val: number) => void;
+  onToggleHub: (hubId: number) => void;
+  onUpdateHubMode: (hubId: number, mode: MobilityHubMode) => void;
+  onFlyToHub: (hubId: number) => void;
+  onExportGeoJson?: () => void;
+  onClose: () => void;
+}) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  if (!isVisible) return null;
+
+  const rescuedCount = summary?.newlyCoveredBuildings ?? 0;
+  const rescuedArea = summary?.newlyCoveredFloorArea ?? 0;
+  const severeReduction = summary != null ? summary.severeGapCoveredBuildings : 0;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        right: 12,
+        top: 12,
+        zIndex: 14,
+        width: "min(390px, calc(100vw - 24px))",
+        maxHeight: "calc(100vh - 110px)",
+        overflowY: "auto",
+        boxSizing: "border-box",
+        background: "rgba(15, 23, 42, 0.94)",
+        color: "#fff",
+        padding: "12px 14px",
+        borderRadius: 8,
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        fontFamily: "sans-serif",
+        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.55)",
+        border: "1.5px solid #f59e0b",
+        pointerEvents: "auto",
+      }}
+      onWheel={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+        <div
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          style={{ cursor: "pointer", flex: 1, userSelect: "none" }}
+        >
+          <div style={{ color: "#fbbf24", fontWeight: "bold", fontSize: 13.5, whiteSpace: "nowrap" }}>
+            モビリティ・ハブ検討シミュレーション
+          </div>
+          <div style={{ fontSize: 11, color: "#fcd34d", marginTop: 1, fontWeight: "500" }}>
+            ※藤沢市実証検討段階の候補地4箇所（未確定）
+          </div>
+          {isCollapsed && (
+            <div style={{ fontSize: 11.5, color: "#e2e8f0", marginTop: 4 }}>
+              有効ハブ: <b>{activeHubIds.length}箇所</b> ／ 救済:{" "}
+              <b style={{ color: "#fbbf24" }}>+{rescuedCount.toLocaleString()}棟</b>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          <button
+            type="button"
+            aria-label={isCollapsed ? "パネルを展開" : "パネルを折りたたむ"}
+            title={isCollapsed ? "展開する" : "折りたたむ"}
+            onClick={() => setIsCollapsed((prev) => !prev)}
+            style={{
+              border: "1px solid rgba(148, 163, 184, 0.4)",
+              borderRadius: 4,
+              background: "rgba(255, 255, 255, 0.08)",
+              color: "#cbd5e1",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: "4px 6px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isCollapsed ? "▼ 展開" : "▲ 縮小"}
+          </button>
+          <button
+            type="button"
+            aria-label="ハブ検討モードを終了して閉じる"
+            title="ハブ検討モードを終了して閉じる"
+            onClick={onClose}
+            style={{
+              border: "1px solid rgba(148, 163, 184, 0.4)",
+              borderRadius: 4,
+              background: "rgba(255, 255, 255, 0.08)",
+              color: "#cbd5e1",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: "4px 6px",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {!isCollapsed && (
+        <>
+          {/* モード選択プリセット */}
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 11, color: "#cbd5e1", marginBottom: 4, fontWeight: "bold" }}>
+              交通モード・一括選択（全ハブに適用）:
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+              {MOBILITY_HUB_MODES.map((modeDef) => {
+                const isSelected = selectedMode === modeDef.id;
+                return (
+                  <button
+                    key={modeDef.id}
+                    type="button"
+                    onClick={() => onSelectMode(modeDef.id)}
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 5,
+                      border: isSelected ? "1.5px solid #fbbf24" : "1px solid rgba(255, 255, 255, 0.15)",
+                      background: isSelected
+                        ? "linear-gradient(180deg, rgba(245, 158, 11, 0.35) 0%, rgba(217, 119, 6, 0.35) 100%)"
+                        : "rgba(255, 255, 255, 0.06)",
+                      color: isSelected ? "#fef3c7" : "#e2e8f0",
+                      fontWeight: isSelected ? "bold" : "normal",
+                      fontSize: 11.5,
+                      cursor: "pointer",
+                      textAlign: "left",
+                      lineHeight: 1.3,
+                    }}
+                  >
+                    <div>{modeDef.label}</div>
+                    <div style={{ fontSize: 10, color: isSelected ? "#fcd34d" : "#94a3b8" }}>
+                      {modeDef.id === "custom"
+                        ? "任意の距離帯"
+                        : `${modeDef.minMeters}m〜${
+                            modeDef.maxMeters >= 1000
+                              ? `${modeDef.maxMeters / 1000}km`
+                              : `${modeDef.maxMeters}m`
+                          }`}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 距離範囲スライダー */}
+          <div
+            style={{
+              marginTop: 10,
+              padding: "8px 10px",
+              borderRadius: 6,
+              background: "rgba(255, 255, 255, 0.05)",
+              border: "1px solid rgba(255, 255, 255, 0.1)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11 }}>
+              <span>
+                ハブからの最小距離: <b>{minMeters}m</b>
+              </span>
+              <span style={{ fontSize: 10, color: "#94a3b8" }}>（徒歩圏の下限）</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={2000}
+              step={50}
+              value={minMeters}
+              onChange={(e) => onChangeMinMeters(Number(e.target.value))}
+              style={{ width: "100%", marginTop: 2 }}
+            />
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 11,
+                marginTop: 6,
+              }}
+            >
+              <span>
+                ハブからの最大到達距離:{" "}
+                <b>
+                  {maxMeters >= 1000
+                    ? `${(maxMeters / 1000).toFixed(1)}km (${maxMeters}m)`
+                    : `${maxMeters}m`}
+                </b>
+              </span>
+              <span style={{ fontSize: 10, color: "#94a3b8" }}>（モビリティ有効圏）</span>
+            </div>
+            <input
+              type="range"
+              min={200}
+              max={4000}
+              step={50}
+              value={maxMeters}
+              onChange={(e) => onChangeMaxMeters(Number(e.target.value))}
+              style={{ width: "100%", marginTop: 2 }}
+            />
+            <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 3 }}>
+              ※上のスライダーは「自由設定」や全体の基本距離帯を調整します。下の候補地リストからハブごとに別々の交通モード（例: H1はサイクル、H4はカーシェア）を個別に指定することも可能です。
+            </div>
+          </div>
+
+          {/* シミュレーション結果カード */}
+          <div
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 6,
+              background: "rgba(245, 158, 11, 0.18)",
+              border: "1px solid rgba(245, 158, 11, 0.5)",
+            }}
+          >
+            <div style={{ fontSize: 11.5, color: "#fef3c7" }}>
+              有効ハブ（{activeHubIds.length}箇所）による救済効果
+            </div>
+            <div style={{ marginTop: 2, fontSize: 22, fontWeight: "bold", color: "#fbbf24" }}>
+              +{rescuedCount.toLocaleString()}棟{" "}
+              <span style={{ fontSize: 13, fontWeight: "normal", color: "#e2e8f0" }}>
+                が空白地から救済（オレンジ）
+              </span>
+            </div>
+            {rescuedArea > 0 && (
+              <div style={{ fontSize: 11.5, color: "#cbd5e1" }}>
+                救済建物の延床面積合計: 約{Math.round(rescuedArea).toLocaleString()}m²
+              </div>
+            )}
+            {summary && (
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 12,
+                  borderTop: "1px solid rgba(255,255,255,0.15)",
+                  paddingTop: 6,
+                }}
+              >
+                <div>
+                  交通空白地（全体）: {summary.totalGapBuildingsBefore.toLocaleString()}棟 →{" "}
+                  <b>{(summary.totalGapBuildingsBefore - rescuedCount).toLocaleString()}棟</b>
+                </div>
+                <div>
+                  深刻な空白地（非常に遠い/濃い赤）: {summary.severeGapBeforeBuildings.toLocaleString()}棟 →{" "}
+                  <b>{(summary.severeGapBeforeBuildings - severeReduction).toLocaleString()}棟</b>
+                  {severeReduction > 0 && (
+                    <span style={{ color: "#86efac", fontWeight: "bold" }}>
+                      （-{severeReduction.toLocaleString()}棟）
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {onExportGeoJson && (
+              <button
+                type="button"
+                onClick={onExportGeoJson}
+                title="候補地と救済建物をGeoJSON形式でダウンロードします（QGIS等で開けます）"
+                style={{
+                  marginTop: 8,
+                  width: "100%",
+                  padding: "6px 10px",
+                  fontSize: 11.5,
+                  fontWeight: "bold",
+                  borderRadius: 4,
+                  border: "1px solid rgba(245, 158, 11, 0.7)",
+                  background: "rgba(217, 119, 6, 0.35)",
+                  color: "#fef3c7",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                }}
+              >
+                <span>ハブ検討結果を出力 (GeoJSON)</span>
+              </button>
+            )}
+          </div>
+
+          {/* 候補地一覧 */}
+          <div style={{ marginTop: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 6,
+              }}
+            >
+              <span style={{ fontWeight: "bold", fontSize: 12, color: "#e2e8f0" }}>
+                検討候補地一覧（全4箇所）
+              </span>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>モード個別変更可</span>
+            </div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {MOBILITY_HUB_CANDIDATES.map((hub) => {
+                const isActive = activeHubIds.includes(hub.id);
+                const currentHubMode = hubModes[hub.id] ?? selectedMode;
+                const hDef = MOBILITY_HUB_MODES.find((m) => m.id === currentHubMode);
+                const hubMin = currentHubMode === "custom" ? minMeters : (hDef?.minMeters ?? minMeters);
+                const hubMax = currentHubMode === "custom" ? maxMeters : (hDef?.maxMeters ?? maxMeters);
+                const stat = summary?.perHubStats.find((s: { hubId: number }) => s.hubId === hub.id);
+                return (
+                  <div
+                    key={hub.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 6,
+                      padding: "6px 8px",
+                      borderRadius: 5,
+                      background: isActive
+                        ? "rgba(255, 255, 255, 0.08)"
+                        : "rgba(255, 255, 255, 0.02)",
+                      border: isActive
+                        ? "1px solid rgba(245, 158, 11, 0.4)"
+                        : "1px solid rgba(255, 255, 255, 0.08)",
+                      opacity: isActive ? 1 : 0.6,
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        minWidth: 0,
+                        cursor: "pointer",
+                        flex: 1,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isActive}
+                        onChange={() => onToggleHub(hub.id)}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div>
+                          <b style={{ color: "#fbbf24" }}>H{hub.id}</b>{" "}
+                          <span style={{ color: "#fff", fontWeight: "bold" }}>{hub.name}</span>
+                        </div>
+                        <div style={{ fontSize: 10.5, color: "#cbd5e1" }}>
+                          {hub.address}
+                          {isActive && stat && (
+                            <div style={{ marginTop: 2 }}>
+                              <span style={{ color: "#fcd34d", fontWeight: "bold" }}>
+                                救済: {stat.coveredBuildings.toLocaleString()}棟
+                              </span>
+                              <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: 5 }}>
+                                （{hubMin}m〜{hubMax >= 1000 ? `${hubMax / 1000}km` : `${hubMax}m`}）
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        onClick={() => onFlyToHub(hub.id)}
+                        style={{
+                          padding: "2px 7px",
+                          fontSize: 10.5,
+                          borderRadius: 3,
+                          border: "1px solid rgba(245, 158, 11, 0.5)",
+                          background: "rgba(217, 119, 6, 0.3)",
+                          color: "#fef3c7",
+                          cursor: "pointer",
+                        }}
+                      >
+                        移動
+                      </button>
+                      {isActive && (
+                        <select
+                          value={currentHubMode}
+                          onChange={(e) => onUpdateHubMode(hub.id, e.target.value as MobilityHubMode)}
+                          style={{
+                            padding: "3px 5px",
+                            fontSize: 11,
+                            fontWeight: "500",
+                            borderRadius: 4,
+                            border: "1px solid rgba(245, 158, 11, 0.6)",
+                            background: "rgba(15, 23, 42, 0.95)",
+                            color: "#fbbf24",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <option value="cycle">サイクル (400-1.5km)</option>
+                          <option value="kickboard">特定小型 (400-1km)</option>
+                          <option value="carshare">カーシェア (1-3km)</option>
+                          <option value="custom">自由設定</option>
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // 「なぜ白いままの建物が多いのか」の説明。左上のLegendは既に縦に長いため、
 // 空いている右下に別枠で表示する（右上はInfoPopupが使う）。
 function UncoloredBuildingsNote() {
@@ -1691,7 +2267,7 @@ export default function PlateauViewer() {
     null
   );
   // 【実験的】道路網距離モデルの閾値倍率（詳細はNETWORK_THRESHOLD_MULTIPLIER_DEFAULTのコメント参照）。
-  // 直線距離モデルの閾値(300m/600m)は常に固定で、このstateは"network"選択時のみ効く。
+  // 直線距離モデルの閾値(400m/800m)は常に固定で、このstateは"network"選択時のみ効く。
   const [networkThresholdMultiplier, setNetworkThresholdMultiplier] = useState(
     NETWORK_THRESHOLD_MULTIPLIER_DEFAULT
   );
@@ -1710,6 +2286,21 @@ export default function PlateauViewer() {
   const [isLegendCollapsed, setIsLegendCollapsed] = useState(false);
   const [isEvaluatingCustomStops, setIsEvaluatingCustomStops] = useState(false);
   const [customStopSummary, setCustomStopSummary] = useState<CustomStopSimulationSummary | null>(null);
+
+  // モビリティ・ハブ実証検討シミュレーション用のstate。
+  const [isMobilityHubActive, setIsMobilityHubActive] = useState(false);
+  const [mobilityHubMode, setMobilityHubMode] = useState<MobilityHubMode>("cycle");
+  const [mobilityHubMinMeters, setMobilityHubMinMeters] = useState(400);
+  const [mobilityHubMaxMeters, setMobilityHubMaxMeters] = useState(1500);
+  const [activeMobilityHubIds, setActiveMobilityHubIds] = useState<number[]>([1, 2, 3, 4]);
+  const [hubModes, setHubModes] = useState<Record<number, MobilityHubMode>>({
+    1: "cycle",
+    2: "cycle",
+    3: "cycle",
+    4: "cycle",
+  });
+  const [mobilityHubSummary, setMobilityHubSummary] = useState<MobilityHubSimulationSummary | null>(null);
+
   // Cesiumのイベントハンドラ（init()内のクロージャ）はマウント時に1度だけ作られ、Reactの
   // 再レンダリングでは作り直されないため、スライダーの最新値をそのクロージャから読めるように
   // refで橋渡しする（値が変わるたびにrefだけ更新し、Viewer自体は再構築しない）。
@@ -1719,6 +2310,14 @@ export default function PlateauViewer() {
   const distanceModelRef = useRef(distanceModel);
   const networkThresholdMultiplierRef = useRef(networkThresholdMultiplier);
   const isAddingCustomStopRef = useRef(isAddingCustomStop);
+  const isMobilityHubActiveRef = useRef(isMobilityHubActive);
+  const mobilityHubModeRef = useRef(mobilityHubMode);
+  const mobilityHubMinMetersRef = useRef(mobilityHubMinMeters);
+  const mobilityHubMaxMetersRef = useRef(mobilityHubMaxMeters);
+  const activeMobilityHubIdsRef = useRef(activeMobilityHubIds);
+  const hubModesRef = useRef(hubModes);
+  const mobilityHubSummaryRef = useRef<MobilityHubSimulationSummary | null>(null);
+
   // ハローサイクリングのピンをinit()内で非同期生成する際、生成時点のトグル状態を
   // 直接参照するためのref（他のトグルと同じ理由。init()のuseEffectは依存配列が空なので、
   // stateを直接参照するとexhaustive-depsの警告が出るうえ値も更新されない）。
@@ -1731,6 +2330,13 @@ export default function PlateauViewer() {
     networkThresholdMultiplierRef.current = networkThresholdMultiplier;
     showHelloCyclingRef.current = showHelloCycling;
     isAddingCustomStopRef.current = isAddingCustomStop;
+    isMobilityHubActiveRef.current = isMobilityHubActive;
+    mobilityHubModeRef.current = mobilityHubMode;
+    mobilityHubMinMetersRef.current = mobilityHubMinMeters;
+    mobilityHubMaxMetersRef.current = mobilityHubMaxMeters;
+    activeMobilityHubIdsRef.current = activeMobilityHubIds;
+    hubModesRef.current = hubModes;
+    mobilityHubSummaryRef.current = mobilityHubSummary;
   }, [
     demandTransitClusterCount,
     demandTransitAnalysisThresholdMultiplier,
@@ -1739,6 +2345,13 @@ export default function PlateauViewer() {
     networkThresholdMultiplier,
     showHelloCycling,
     isAddingCustomStop,
+    isMobilityHubActive,
+    mobilityHubMode,
+    mobilityHubMinMeters,
+    mobilityHubMaxMeters,
+    activeMobilityHubIds,
+    hubModes,
+    mobilityHubSummary,
   ]);
   // init()内で定義されるscheduleDemandTransitRecomputeをスライダーのonChangeから呼べるように
   // するための橋渡し。Viewerがまだ初期化中の場合はnullのままで、呼び出し側でガードする。
@@ -1763,9 +2376,87 @@ export default function PlateauViewer() {
   const reapplyCustomStopScoresRef = useRef<(() => void) | null>(null);
   const exportCustomStopSimulationGeoJsonRef = useRef<(() => void) | null>(null);
   const customStopSummaryRef = useRef<CustomStopSimulationSummary | null>(null);
+
+  // モビリティ・ハブ操作用ref。
+  const reapplyMobilityHubScoresRef = useRef<(() => void) | null>(null);
+  const flyToMobilityHubRef = useRef<((hubId: number) => void) | null>(null);
+  const exportMobilityHubGeoJsonRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     customStopSummaryRef.current = customStopSummary;
   }, [customStopSummary]);
+
+  const handleSelectMobilityHubMode = (mode: MobilityHubMode) => {
+    setMobilityHubMode(mode);
+    mobilityHubModeRef.current = mode;
+    const def = MOBILITY_HUB_MODES.find((m) => m.id === mode);
+    if (def) {
+      setMobilityHubMinMeters(def.minMeters);
+      mobilityHubMinMetersRef.current = def.minMeters;
+      setMobilityHubMaxMeters(def.maxMeters);
+      mobilityHubMaxMetersRef.current = def.maxMeters;
+    }
+    const nextHubModes: Record<number, MobilityHubMode> = { 1: mode, 2: mode, 3: mode, 4: mode };
+    setHubModes(nextHubModes);
+    hubModesRef.current = nextHubModes;
+    reapplyMobilityHubScoresRef.current?.();
+  };
+
+  const handleUpdateHubMode = (hubId: number, mode: MobilityHubMode) => {
+    const next = { ...hubModesRef.current, [hubId]: mode };
+    hubModesRef.current = next;
+    setHubModes(next);
+    reapplyMobilityHubScoresRef.current?.();
+  };
+
+  const handleChangeMobilityHubMinMeters = (val: number) => {
+    setMobilityHubMinMeters(val);
+    mobilityHubMinMetersRef.current = val;
+    setMobilityHubMode("custom");
+    mobilityHubModeRef.current = "custom";
+    reapplyMobilityHubScoresRef.current?.();
+  };
+
+  const handleChangeMobilityHubMaxMeters = (val: number) => {
+    setMobilityHubMaxMeters(val);
+    mobilityHubMaxMetersRef.current = val;
+    setMobilityHubMode("custom");
+    mobilityHubModeRef.current = "custom";
+    reapplyMobilityHubScoresRef.current?.();
+  };
+
+  const handleToggleMobilityHub = (hubId: number) => {
+    const prev = activeMobilityHubIdsRef.current;
+    const next = prev.includes(hubId) ? prev.filter((id) => id !== hubId) : [...prev, hubId];
+    activeMobilityHubIdsRef.current = next;
+    setActiveMobilityHubIds(next);
+    reapplyMobilityHubScoresRef.current?.();
+  };
+
+  const handleToggleMobilityHubActive = () => {
+    setIsMobilityHubActive((prev) => {
+      const next = !prev;
+      isMobilityHubActiveRef.current = next;
+      if (next) {
+        setIsLegendCollapsed(true);
+        if (isAddingCustomStopRef.current) {
+          setIsAddingCustomStop(false);
+          isAddingCustomStopRef.current = false;
+        }
+      } else {
+        setIsLegendCollapsed(false);
+      }
+      reapplyMobilityHubScoresRef.current?.();
+      return next;
+    });
+  };
+
+  const handleCloseMobilityHub = () => {
+    setIsMobilityHubActive(false);
+    isMobilityHubActiveRef.current = false;
+    setIsLegendCollapsed(false);
+    reapplyMobilityHubScoresRef.current?.();
+  };
   // ハローサイクリングのピンとして作成した全エンティティを保持し、トグル操作のたびに
   // entity.showを一括で切り替えられるようにする（データの再取得・再作成はしない）。
   const helloCyclingEntitiesRef = useRef<Cesium.Entity[]>([]);
@@ -2030,8 +2721,45 @@ export default function PlateauViewer() {
         console.warn("ハローサイクリングのステーションデータの読み込みに失敗しました。ピン表示なしで継続します。", err);
       }
 
+      // モビリティ・ハブ実証検討候補地（藤沢市提示の4箇所）のピン。
+      // モビリティ・ハブモードが有効な時、かつactiveMobilityHubIdsに含まれるハブのみ表示する。
+      type MobilityHubRuntime = {
+        hub: MobilityHubSite;
+        entity: Cesium.Entity;
+      };
+      const mobilityHubEntities: MobilityHubRuntime[] = [];
+      for (const hub of MOBILITY_HUB_CANDIDATES) {
+        const entity = viewer.entities.add({
+          name: `モビリティ・ハブ候補地 H${hub.id}（${hub.name}）`,
+          position: Cesium.Cartesian3.fromDegrees(hub.lng, hub.lat),
+          show: isMobilityHubActiveRef.current && activeMobilityHubIdsRef.current.includes(hub.id),
+          properties: {
+            isMobilityHub: true,
+            hubId: hub.id,
+            hubData: hub,
+          },
+          billboard: {
+            image: createMobilityHubPinIconDataUrl(hub.id),
+            width: 32,
+            height: 32,
+            verticalOrigin: Cesium.VerticalOrigin.CENTER,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+        mobilityHubEntities.push({ hub, entity });
+      }
+
+      function updateMobilityHubEntityVisibility() {
+        const isActive = isMobilityHubActiveRef.current;
+        const activeIds = activeMobilityHubIdsRef.current;
+        for (const { hub, entity } of mobilityHubEntities) {
+          entity.show = isActive && activeIds.includes(hub.id);
+        }
+      }
+
       // 住宅系建物ごとに「最寄りバス停・最寄り駅までの傾斜込み実効距離」を計算し、市の距離基準を参考にした
-      // 距離閾値を参考にした独自推計（駅600m or バス300mのOR）で3D Tilesのフィーチャーを直接色分けする。
+      // 距離閾値を参考にした独自推計（駅800m or バス400mのOR）で3D Tilesのフィーチャーを直接色分けする。
       // buildingScoreCache は建物ID(_x,_yから作る代替IDを含む)をキーに永続化し、タイルが
       // アンロード→再ロードされて新しいCesium3DTileFeatureインスタンスになった場合でも
       // 地形サンプリングをやり直さずに再着色できるようにする。featureScoreMapは
@@ -2181,6 +2909,105 @@ export default function PlateauViewer() {
 
         setCustomStopSummary(summary);
         customStopSummaryRef.current = summary;
+        refreshLoadedTileFeatureColors();
+      }
+
+      let mobilityHubSimulationTimer: ReturnType<typeof setTimeout> | null = null;
+      function scheduleMobilityHubSimulation(delayMs = 60) {
+        if (!isMobilityHubActiveRef.current) return;
+        if (mobilityHubSimulationTimer) clearTimeout(mobilityHubSimulationTimer);
+        mobilityHubSimulationTimer = setTimeout(() => {
+          mobilityHubSimulationTimer = null;
+          reapplyMobilityHubScoresToBuildings();
+        }, delayMs);
+      }
+
+      function reapplyMobilityHubScoresToBuildings() {
+        if (cancelled) return;
+        updateMobilityHubEntityVisibility();
+        if (!isMobilityHubActiveRef.current) {
+          // ハブ検討が無効化された場合はベース色・情報に戻す
+          for (const cached of buildingScoreCache.values()) {
+            cached.color = cached.baseColor;
+            cached.info = cached.baseInfo;
+          }
+          setMobilityHubSummary(null);
+          mobilityHubSummaryRef.current = null;
+          refreshLoadedTileFeatureColors();
+          return;
+        }
+
+        const activeHubs = MOBILITY_HUB_CANDIDATES.filter((h) =>
+          activeMobilityHubIdsRef.current.includes(h.id)
+        );
+
+        const records: MobilityHubBuildingRecord[] = [];
+        for (const [buildingId, cached] of buildingScoreCache.entries()) {
+          records.push({
+            buildingId,
+            lat: cached.baseInfo.lat,
+            lng: cached.baseInfo.lng,
+            baseCoverageRatio: cached.baseInfo.coverageRatio,
+            totalFloorArea: cached.baseInfo.totalFloorArea,
+            baseBusEffectiveDistanceMeters: cached.baseInfo.busEffectiveDistanceMeters,
+            usage: cached.baseInfo.usage,
+          });
+        }
+
+        const minMeters = mobilityHubMinMetersRef.current;
+        const maxMeters = mobilityHubMaxMetersRef.current;
+        const modeKey = mobilityHubModeRef.current;
+        const modeDef = MOBILITY_HUB_MODES.find((m) => m.id === modeKey);
+        const modeLabel = modeDef?.label ?? "自由設定";
+
+        const hubConfigs = new Map<number, MobilityHubSiteConfig>();
+        for (const hub of activeHubs) {
+          const hMode = hubModesRef.current[hub.id] ?? modeKey;
+          const hDef = MOBILITY_HUB_MODES.find((m) => m.id === hMode);
+          const hMin = hMode === "custom" ? minMeters : (hDef?.minMeters ?? minMeters);
+          const hMax = hMode === "custom" ? maxMeters : (hDef?.maxMeters ?? maxMeters);
+          hubConfigs.set(hub.id, {
+            hubId: hub.id,
+            mode: hMode,
+            minDistanceMeters: hMin,
+            maxDistanceMeters: hMax,
+          });
+        }
+
+        const { outcomes, summary } = evaluateMobilityHubSimulation(
+          records,
+          activeHubs,
+          minMeters,
+          maxMeters,
+          modeKey,
+          hubConfigs
+        );
+
+        const hubRescuedColor = Cesium.Color.fromCssColorString(MOBILITY_HUB_PIN_COLOR_HEX);
+
+        for (const [buildingId, cached] of buildingScoreCache.entries()) {
+          const outcome = outcomes.get(buildingId);
+          if (outcome && outcome.isCoveredByHub && outcome.nearestHubId != null && outcome.nearestHubName != null) {
+            const nearestHub = activeHubs.find((h) => h.id === outcome.nearestHubId);
+            cached.color = hubRescuedColor;
+            cached.info = {
+              ...cached.baseInfo,
+              mobilityHubImprovement: {
+                hubId: outcome.nearestHubId,
+                hubName: outcome.nearestHubName,
+                hubAddress: nearestHub?.address ?? "",
+                hubDistanceMeters: outcome.hubDistanceMeters,
+                modeLabel: outcome.modeLabel ?? modeLabel,
+              },
+            };
+          } else {
+            cached.color = cached.baseColor;
+            cached.info = cached.baseInfo;
+          }
+        }
+
+        setMobilityHubSummary(summary);
+        mobilityHubSummaryRef.current = summary;
         refreshLoadedTileFeatureColors();
       }
 
@@ -2474,6 +3301,110 @@ export default function PlateauViewer() {
       flyToCustomStopRef.current = flyToCustomStop;
       reapplyCustomStopScoresRef.current = reapplyCustomStopScoresToBuildings;
       exportCustomStopSimulationGeoJsonRef.current = exportCustomStopSimulationGeoJson;
+
+      function exportMobilityHubSimulationGeoJson() {
+        const activeHubs = MOBILITY_HUB_CANDIDATES.filter((h) =>
+          activeMobilityHubIdsRef.current.includes(h.id)
+        );
+        const records: MobilityHubBuildingRecord[] = [];
+        for (const [buildingId, cached] of buildingScoreCache.entries()) {
+          records.push({
+            buildingId,
+            lat: cached.baseInfo.lat,
+            lng: cached.baseInfo.lng,
+            baseCoverageRatio: cached.baseInfo.coverageRatio,
+            totalFloorArea: cached.baseInfo.totalFloorArea,
+            baseBusEffectiveDistanceMeters: cached.baseInfo.busEffectiveDistanceMeters,
+            usage: cached.baseInfo.usage,
+          });
+        }
+        const minMeters = mobilityHubMinMetersRef.current;
+        const maxMeters = mobilityHubMaxMetersRef.current;
+        const modeKey = mobilityHubModeRef.current;
+        const modeDef = MOBILITY_HUB_MODES.find((m) => m.id === modeKey);
+        const modeLabel = modeDef?.label ?? "自由設定";
+
+        const hubConfigs = new Map<number, MobilityHubSiteConfig>();
+        for (const hub of activeHubs) {
+          const hMode = hubModesRef.current[hub.id] ?? modeKey;
+          const hDef = MOBILITY_HUB_MODES.find((m) => m.id === hMode);
+          const hMin = hMode === "custom" ? minMeters : (hDef?.minMeters ?? minMeters);
+          const hMax = hMode === "custom" ? maxMeters : (hDef?.maxMeters ?? maxMeters);
+          hubConfigs.set(hub.id, {
+            hubId: hub.id,
+            mode: hMode,
+            minDistanceMeters: hMin,
+            maxDistanceMeters: hMax,
+          });
+        }
+
+        const { outcomes } = evaluateMobilityHubSimulation(
+          records,
+          activeHubs,
+          minMeters,
+          maxMeters,
+          modeKey,
+          hubConfigs
+        );
+
+        const coveredBuildings: MobilityHubCoveredBuildingExportItem[] = [];
+        for (const r of records) {
+          const outcome = outcomes.get(r.buildingId);
+          if (outcome && outcome.isCoveredByHub && outcome.nearestHubName != null) {
+            coveredBuildings.push({
+              buildingId: r.buildingId,
+              lat: r.lat,
+              lng: r.lng,
+              usage: r.usage,
+              totalFloorArea: r.totalFloorArea,
+              nearestHubName: outcome.nearestHubName,
+              hubDistanceMeters: outcome.hubDistanceMeters,
+              originalBusDistanceMeters: r.baseBusEffectiveDistanceMeters,
+              appliedModeLabel: outcome.modeLabel,
+            });
+          }
+        }
+
+        const geoJson = buildMobilityHubSimulationGeoJson({
+          hubs: activeHubs,
+          modeLabel,
+          minDistanceMeters: minMeters,
+          maxDistanceMeters: maxMeters,
+          coveredBuildings,
+        });
+
+        const jsonStr = JSON.stringify(geoJson, null, 2);
+        const blob = new Blob([jsonStr], { type: "application/geo+json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        a.href = url;
+        a.download = `mobility_hub_simulation_${modeKey}_${minMeters}m-${maxMeters}m_${timestamp}.geojson`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function flyToMobilityHub(hubId: number) {
+        const hub = MOBILITY_HUB_CANDIDATES.find((h) => h.id === hubId);
+        if (!hub) return;
+        const center = Cesium.Cartesian3.fromDegrees(hub.lng, hub.lat);
+        viewer.camera.flyToBoundingSphere(new Cesium.BoundingSphere(center, 700), {
+          offset: new Cesium.HeadingPitchRange(
+            viewer.camera.heading,
+            Cesium.Math.toRadians(-35),
+            1000
+          ),
+          duration: 1.0,
+        });
+      }
+
+      reapplyMobilityHubScoresRef.current = reapplyMobilityHubScoresToBuildings;
+      flyToMobilityHubRef.current = flyToMobilityHub;
+      exportMobilityHubGeoJsonRef.current = exportMobilityHubSimulationGeoJson;
 
       // デマンド交通乗り場候補（k-meansのクラスタ重心）を紫の四角ピンで表示する。
       // 建物のスコア計算が進むたびに（buildingScoreCacheが更新されるたびに）再クラスタリングする
@@ -2808,6 +3739,7 @@ export default function PlateauViewer() {
         if (liveCandidates.length === 0) {
           scheduleDemandTransitRecompute();
           scheduleCustomStopEvaluation();
+          scheduleMobilityHubSimulation();
           return true;
         }
 
@@ -2907,6 +3839,7 @@ export default function PlateauViewer() {
 
         scheduleDemandTransitRecompute();
         scheduleCustomStopEvaluation();
+        scheduleMobilityHubSimulation();
         return true;
       }
 
@@ -2938,6 +3871,7 @@ export default function PlateauViewer() {
         demandTransitAnalysisMembers = null;
         demandTransitAnalysisSites = null;
         scheduleDemandTransitRecompute();
+        scheduleMobilityHubSimulation();
         if (analysisRequested) scheduleDemandTransitAnalysis();
         return generation;
       }
@@ -2976,6 +3910,7 @@ export default function PlateauViewer() {
         if (demandTransitRecomputeTimer) clearTimeout(demandTransitRecomputeTimer);
         if (demandTransitAnalysisTimer) clearTimeout(demandTransitAnalysisTimer);
         if (customStopEvalTimer) clearTimeout(customStopEvalTimer);
+        if (mobilityHubSimulationTimer) clearTimeout(mobilityHubSimulationTimer);
         tileWork.invalidate();
       };
 
@@ -3170,11 +4105,42 @@ export default function PlateauViewer() {
             title: entity.name ?? "ハローサイクリング ステーション",
             lines: [...(capacity != null ? [`収容可能台数: ${capacity}台`] : [])],
           });
+        } else if (entity instanceof Cesium.Entity && entity.properties?.isMobilityHub?.getValue()) {
+          const hub: MobilityHubSite = entity.properties.hubData.getValue();
+          const hubMode = hubModesRef.current[hub.id] ?? mobilityHubModeRef.current;
+          const modeDef = MOBILITY_HUB_MODES.find((m) => m.id === hubMode);
+          const stat = mobilityHubSummaryRef.current?.perHubStats.find((s: { hubId: number }) => s.hubId === hub.id);
+          const hubMin = stat?.minMeters ?? (hubMode === "custom" ? mobilityHubMinMetersRef.current : (modeDef?.minMeters ?? 400));
+          const hubMax = stat?.maxMeters ?? (hubMode === "custom" ? mobilityHubMaxMetersRef.current : (modeDef?.maxMeters ?? 1500));
+          setPopup({
+            title: `モビリティ・ハブ検討候補地 H${hub.id}`,
+            lines: [
+              `名称: ${hub.name}`,
+              `所在地: ${hub.address}`,
+              <span key="note" style={{ color: "#fcd34d", fontSize: 11 }}>
+                ※藤沢市実証検討段階の候補地（未確定）
+              </span>,
+              `設定モード: ${modeDef?.label ?? "自由設定"}（${hubMin}m〜${hubMax >= 1000 ? `${hubMax / 1000}km` : `${hubMax}m`}）`,
+              ...(stat
+                ? [
+                    <span key="stat" style={{ color: "#fbbf24", fontWeight: "bold" }}>
+                      単独救済建物: {stat.coveredBuildings}棟
+                    </span>,
+                  ]
+                : []),
+              `座標: 北緯${hub.lat.toFixed(6)}, 東経${hub.lng.toFixed(6)}`,
+            ],
+          });
         } else if (picked instanceof Cesium.Cesium3DTileFeature) {
           const info = featureScoreMap.get(picked);
           if (info) {
+            const hubImp = info.mobilityHubImprovement;
             const imp = info.customStopImprovement;
-            const statusNode: ReactNode = imp?.isNewlyCovered ? (
+            const statusNode: ReactNode = hubImp ? (
+              <span key="status" style={{ color: "#f59e0b", fontWeight: "bold" }}>
+                判定: モビリティ・ハブ救済（H{hubImp.hubId} {hubImp.hubName} の{hubImp.modeLabel}圏内）
+              </span>
+            ) : imp?.isNewlyCovered ? (
               <span key="status" style={{ color: "#38bdf8", fontWeight: "bold" }}>
                 判定: 新規カバー（{imp.stopLabel} により空白地解消）
               </span>
@@ -3185,6 +4151,14 @@ export default function PlateauViewer() {
               title: info.usage,
               lines: [
                 statusNode,
+                ...(hubImp
+                  ? [
+                      <span key="hubImp" style={{ color: "#fbbf24" }}>
+                        最寄りハブ: H{hubImp.hubId} {hubImp.hubName}（直線距離 約
+                        {Math.round(hubImp.hubDistanceMeters)}m・{hubImp.modeLabel}）
+                      </span>,
+                    ]
+                  : []),
                 ...(imp
                   ? [
                       <span key="customStop" style={{ color: "#7dd3fc" }}>
@@ -3239,6 +4213,9 @@ export default function PlateauViewer() {
       flyToCustomStopRef.current = null;
       reapplyCustomStopScoresRef.current = null;
       exportCustomStopSimulationGeoJsonRef.current = null;
+      reapplyMobilityHubScoresRef.current = null;
+      flyToMobilityHubRef.current = null;
+      exportMobilityHubGeoJsonRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
@@ -3314,6 +4291,10 @@ export default function PlateauViewer() {
         isAddingCustomStop={isAddingCustomStop}
         customStopCount={customStopSummary?.stopCount ?? 0}
         customStopNewlyCoveredCount={customStopSummary?.newlyCoveredBuildings ?? 0}
+        isMobilityHubActive={isMobilityHubActive}
+        onToggleMobilityHubActive={handleToggleMobilityHubActive}
+        mobilityHubRescuedCount={mobilityHubSummary?.newlyCoveredBuildings}
+        mobilityHubRescuedArea={mobilityHubSummary?.newlyCoveredFloorArea}
         isCollapsed={isLegendCollapsed}
         onToggleCollapsed={() => setIsLegendCollapsed((prev) => !prev)}
         onToggleAddingCustomStop={() => {
@@ -3321,6 +4302,9 @@ export default function PlateauViewer() {
             const next = !prev;
             if (next) {
               setIsLegendCollapsed(true);
+              if (isMobilityHubActiveRef.current) {
+                handleCloseMobilityHub();
+              }
             } else if ((customStopSummary?.stopCount ?? 0) === 0) {
               setIsLegendCollapsed(false);
             }
@@ -3344,6 +4328,9 @@ export default function PlateauViewer() {
         onToggleAddingCustomStop={() => {
           setIsAddingCustomStop((prev) => {
             const next = !prev;
+            if (next && isMobilityHubActiveRef.current) {
+              handleCloseMobilityHub();
+            }
             if (!next && (customStopSummary?.stopCount ?? 0) === 0) {
               setIsLegendCollapsed(false);
             }
@@ -3363,6 +4350,23 @@ export default function PlateauViewer() {
           clearCustomStopsRef.current?.();
           setIsLegendCollapsed(false);
         }}
+      />
+      <MobilityHubSimulationPanel
+        isVisible={isMobilityHubActive}
+        selectedMode={mobilityHubMode}
+        minMeters={mobilityHubMinMeters}
+        maxMeters={mobilityHubMaxMeters}
+        activeHubIds={activeMobilityHubIds}
+        hubModes={hubModes}
+        summary={mobilityHubSummary}
+        onSelectMode={handleSelectMobilityHubMode}
+        onChangeMinMeters={handleChangeMobilityHubMinMeters}
+        onChangeMaxMeters={handleChangeMobilityHubMaxMeters}
+        onToggleHub={handleToggleMobilityHub}
+        onUpdateHubMode={handleUpdateHubMode}
+        onFlyToHub={(id) => flyToMobilityHubRef.current?.(id)}
+        onExportGeoJson={() => exportMobilityHubGeoJsonRef.current?.()}
+        onClose={handleCloseMobilityHub}
       />
       {analysisError && <div role="alert" style={{position:'absolute',right:12,top:12,zIndex:20,maxWidth:360,padding:12,background:'#7f1d1d',color:'white'}}>{analysisError}<button onClick={()=>setAnalysisError(null)} aria-label="通知を閉じる">×</button></div>}
       <UncoloredBuildingsNote />

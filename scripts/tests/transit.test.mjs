@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const load = createRequire(`${process.env.TRANSIT_TEST_BUILD}/test.cjs`);
 const { TileWorkGate } = load('./async-generation.js');
 const { NetworkRouter } = load('./network-routing.js');
-const { buildGreedyDemandTransitPlan, evaluateCustomStopsSimulation, buildCustomStopSimulationGeoJson } = load('./transit-analysis.js');
+const { buildGreedyDemandTransitPlan, evaluateCustomStopsSimulation, buildCustomStopSimulationGeoJson, evaluateMobilityHubSimulation, buildMobilityHubSimulationGeoJson, MOBILITY_HUB_CANDIDATES } = load('./transit-analysis.js');
 
 test('old work cannot overwrite a newer generation; duplicate work is suppressed',async()=>{
   const gate=new TileWorkGate(), tile={}; let release; let value=''; let calls=0;
@@ -37,7 +37,7 @@ test('routing respects a detour instead of using cross-barrier straight distance
 });
 test('additional sites never worsen access and empty targets are supported',()=>{
   assert.deepEqual(buildGreedyDemandTransitPlan([],10,1),{sites:[],results:[]});
-  const members=Array.from({length:20},(_,i)=>({lat:35+i*.001,lng:139,busStraightDistanceMeters:500,busEffectiveDistanceMeters:700,stationEffectiveDistanceMeters:2000,coverageRatio:700/300}));
+  const members=Array.from({length:20},(_,i)=>({lat:35+i*.001,lng:139,busStraightDistanceMeters:500,busEffectiveDistanceMeters:700,stationEffectiveDistanceMeters:2000,coverageRatio:700/400}));
   const {results}=buildGreedyDemandTransitPlan(members,10,1);
   for(let i=0;i<results.length;i++) {
     assert.ok(results[i].averageAfterMeters <= (i?results[i-1].averageAfterMeters:700));
@@ -46,17 +46,17 @@ test('additional sites never worsen access and empty targets are supported',()=>
 });
 test('evaluateCustomStopsSimulation aggregates newly covered buildings across multiple custom stops',()=>{
   const buildings = [
-    { buildingId: 'b1', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 520, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 520 / 300, totalFloorArea: 120 },
-    { buildingId: 'b2', lat: 35.361, lng: 139.451, baseBusEffectiveDistanceMeters: 410, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 410 / 300, totalFloorArea: 80 },
-    { buildingId: 'b3', lat: 35.362, lng: 139.452, baseBusEffectiveDistanceMeters: 180, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 180 / 300, totalFloorArea: 100 },
+    { buildingId: 'b1', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 620, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 620 / 400, totalFloorArea: 120 },
+    { buildingId: 'b2', lat: 35.361, lng: 139.451, baseBusEffectiveDistanceMeters: 510, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 510 / 400, totalFloorArea: 80 },
+    { buildingId: 'b3', lat: 35.362, lng: 139.452, baseBusEffectiveDistanceMeters: 280, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 280 / 400, totalFloorArea: 100 },
   ];
   const stops = [
     { id: 1, label: '仮設停留所 #1', lat: 35.36, lng: 139.45 },
     { id: 2, label: '仮設停留所 #2', lat: 35.361, lng: 139.451 },
   ];
   const stopDistanceMap = new Map([
-    [1, new Map([['b1', 210], ['b2', 290]])],
-    [2, new Map([['b2', 140]])],
+    [1, new Map([['b1', 280], ['b2', 380]])],
+    [2, new Map([['b2', 200]])],
   ]);
   const { outcomes, summary } = evaluateCustomStopsSimulation(buildings, stops, stopDistanceMap, 1);
   assert.equal(summary.stopCount, 2);
@@ -73,15 +73,15 @@ test('evaluateCustomStopsSimulation aggregates newly covered buildings across mu
   assert.equal(outcomes.get('b1')?.isNewlyCovered, true);
   assert.equal(outcomes.get('b1')?.bestStopId, 1);
   assert.equal(outcomes.get('b2')?.bestStopId, 2);
-  assert.equal(outcomes.get('b2')?.afterBusEffectiveDistanceMeters, 140);
+  assert.equal(outcomes.get('b2')?.afterBusEffectiveDistanceMeters, 200);
 });
 test('evaluateCustomStopsSimulation respects thresholdMultiplier for custom stop coverage without falsely covering distant gap buildings',()=>{
   const buildings = [
-    { buildingId: 'nearCustom', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 480, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 480 / 300, totalFloorArea: 100 },
-    { buildingId: 'farFromCustom', lat: 35.37, lng: 139.46, baseBusEffectiveDistanceMeters: 330, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 330 / 300, totalFloorArea: 100 },
+    { buildingId: 'nearCustom', lat: 35.36, lng: 139.45, baseBusEffectiveDistanceMeters: 580, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 580 / 400, totalFloorArea: 100 },
+    { buildingId: 'farFromCustom', lat: 35.37, lng: 139.46, baseBusEffectiveDistanceMeters: 440, baseStationEffectiveDistanceMeters: 1200, baseCoverageRatio: 440 / 400, totalFloorArea: 100 },
   ];
   const stops = [{ id: 1, label: '仮設停留所 #1', lat: 35.36, lng: 139.45 }];
-  const stopDistanceMap = new Map([[1, new Map([['nearCustom', 340]])]]);
+  const stopDistanceMap = new Map([[1, new Map([['nearCustom', 440]])]]);
   const res10 = evaluateCustomStopsSimulation(buildings, stops, stopDistanceMap, 1.0);
   assert.equal(res10.summary.newlyCoveredBuildings, 0);
   assert.equal(res10.outcomes.get('nearCustom')?.isNewlyCovered, false);
@@ -139,4 +139,70 @@ test('buildCustomStopSimulationGeoJson creates valid GeoJSON with stops and newl
   assert.equal(bldgFeature.properties.reduced_distance_m, 340);
   assert.equal(bldgFeature.properties.walk_profile, '高齢者（坂道の負荷係数2倍）');
 });
+
+test('evaluateMobilityHubSimulation extracts gap buildings within range of hubs',()=>{
+  const hubs = [
+    { id: 2, name: '湘南大庭市民センター', address: '藤沢市大庭5406-1', description: '市民センター', lat: 35.36478, lng: 139.446457 },
+  ];
+  const buildings = [
+    // 500m away, gap building (ratio 1.2 > 1) -> should be covered (min 400m, max 1500m)
+    { buildingId: 'b_target', lat: 35.368, lng: 139.446457, baseCoverageRatio: 1.2, totalFloorArea: 150, baseBusEffectiveDistanceMeters: 480 },
+    // 200m away, gap building -> too close (< 400m)
+    { buildingId: 'b_tooclose', lat: 35.366, lng: 139.446457, baseCoverageRatio: 1.2, totalFloorArea: 100, baseBusEffectiveDistanceMeters: 480 },
+    // 3000m away -> too far (> 1500m)
+    { buildingId: 'b_toofar', lat: 35.39, lng: 139.446457, baseCoverageRatio: 1.4, totalFloorArea: 80, baseBusEffectiveDistanceMeters: 600 },
+    // 600m away, NOT gap (ratio 0.8 <= 1) -> already covered by bus/train, should not be included
+    { buildingId: 'b_notgap', lat: 35.369, lng: 139.446457, baseCoverageRatio: 0.8, totalFloorArea: 200, baseBusEffectiveDistanceMeters: 300 },
+  ];
+
+  const { outcomes, summary } = evaluateMobilityHubSimulation(buildings, hubs, 400, 1500, 'cycle');
+
+  assert.equal(summary.activeHubCount, 1);
+  assert.equal(summary.totalGapBuildingsBefore, 3);
+  assert.equal(summary.newlyCoveredBuildings, 1);
+  assert.equal(summary.newlyCoveredFloorArea, 150);
+  assert.equal(summary.perHubStats[0].coveredBuildings, 1);
+
+  assert.equal(outcomes.get('b_target')?.isCoveredByHub, true);
+  assert.equal(outcomes.get('b_target')?.nearestHubId, 2);
+  assert.equal(outcomes.has('b_tooclose'), false);
+  assert.equal(outcomes.has('b_toofar'), false);
+  assert.equal(outcomes.has('b_notgap'), false);
+
+  const geojson = buildMobilityHubSimulationGeoJson({
+    hubs,
+    modeLabel: 'シェアサイクル (400m〜1500m)',
+    minDistanceMeters: 400,
+    maxDistanceMeters: 1500,
+    coveredBuildings: [
+      {
+        buildingId: 'b_target',
+        lat: 35.368,
+        lng: 139.446457,
+        usage: '住宅',
+        totalFloorArea: 150,
+        nearestHubName: '湘南大庭市民センター',
+        hubDistanceMeters: 520,
+        originalBusDistanceMeters: 480,
+      },
+    ],
+  });
+
+  assert.equal(geojson.type, 'FeatureCollection');
+  assert.equal(geojson.features.length, 2);
+  assert.equal(geojson.features[0].properties.feature_type, 'mobility_hub_candidate');
+  assert.equal(geojson.features[1].properties.feature_type, 'hub_rescued_gap_building');
+  assert.equal(MOBILITY_HUB_CANDIDATES.length, 4);
+
+  // Test per-hub mode configuration (e.g. Hub 2 has carshare 1000m-3500m)
+  const customConfigs = new Map([
+    [2, { hubId: 2, mode: 'carshare', minDistanceMeters: 1000, maxDistanceMeters: 3500 }],
+  ]);
+  const perHubSim = evaluateMobilityHubSimulation(buildings, hubs, 400, 1500, 'cycle', customConfigs);
+  assert.equal(perHubSim.summary.newlyCoveredBuildings, 1);
+  assert.equal(perHubSim.outcomes.get('b_toofar')?.isCoveredByHub, true);
+  assert.equal(perHubSim.outcomes.get('b_toofar')?.mode, 'carshare');
+  assert.equal(perHubSim.outcomes.has('b_target'), false); // 500m away, below 1000m
+});
+
 

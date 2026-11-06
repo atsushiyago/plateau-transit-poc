@@ -1,6 +1,6 @@
 const EARTH_RADIUS_METERS = 6371000;
-export const BUS_COVERAGE_THRESHOLD_METERS = 300;
-export const STATION_COVERAGE_THRESHOLD_METERS = 600;
+export const BUS_COVERAGE_THRESHOLD_METERS = 400;
+export const STATION_COVERAGE_THRESHOLD_METERS = 800;
 export type WalkProfile = "general" | "elderly";
 export const WALK_PROFILES: Record<WalkProfile, { label: string; slopePenaltyFactor: number; walkSpeedMPerMin: number }> = {
   // 勾配1あたり実効距離を何倍割り増しするかの係数。例: 勾配0.1(10%)ならslopePenaltyFactor=3で
@@ -562,5 +562,351 @@ export function buildCustomStopSimulationGeoJson(params: {
     features,
   };
 }
+
+// -----------------------------------------------------------------------------
+// モビリティ・ハブ検討シミュレーション
+// -----------------------------------------------------------------------------
+
+export type MobilityHubSite = {
+  id: number;
+  name: string;
+  address: string;
+  description: string;
+  lat: number;
+  lng: number;
+};
+
+// 藤沢市北部におけるモビリティ・ハブ検討候補地点（実証検討シナリオ用）
+export const MOBILITY_HUB_CANDIDATES: MobilityHubSite[] = [
+  {
+    id: 1,
+    name: "① 湘南大庭南部",
+    address: "藤沢市大庭5061-28",
+    description: "大庭団地南側エリア",
+    lat: 35.358536,
+    lng: 139.444244,
+  },
+  {
+    id: 2,
+    name: "② 湘南大庭市民センター",
+    address: "藤沢市大庭5406-1",
+    description: "市民センター・公民館・図書館",
+    lat: 35.36478,
+    lng: 139.446457,
+  },
+  {
+    id: 3,
+    name: "③ 遠藤中央・秋葉台西",
+    address: "藤沢市遠藤869-1",
+    description: "遠藤中央・秋葉台公園西側エリア",
+    lat: 35.37603,
+    lng: 139.435013,
+  },
+  {
+    id: 4,
+    name: "④ 遠藤北部",
+    address: "藤沢市遠藤3924-1",
+    description: "遠藤北部・慶応SFC〜少年の森方面",
+    lat: 35.384098,
+    lng: 139.439621,
+  },
+];
+
+export type MobilityHubMode = "cycle" | "kickboard" | "carshare" | "custom";
+
+export type MobilityHubModePreset = {
+  id: MobilityHubMode;
+  label: string;
+  icon: string;
+  minMeters: number;
+  maxMeters: number;
+  description: string;
+};
+
+export const MOBILITY_HUB_MODES: MobilityHubModePreset[] = [
+  {
+    id: "cycle",
+    label: "シェアサイクル",
+    icon: "🚲",
+    minMeters: 400,
+    maxMeters: 1500,
+    description: "徒歩5分超〜自転車約7分圏。日常的な買い物やハブへの移動",
+  },
+  {
+    id: "kickboard",
+    label: "特定小型原付",
+    icon: "🛴",
+    minMeters: 400,
+    maxMeters: 1000,
+    description: "徒歩5分超〜電動キックボード約5分圏。短距離のラストワンマイル",
+  },
+  {
+    id: "carshare",
+    label: "カーシェア/小型EV",
+    icon: "🚗",
+    minMeters: 1000,
+    maxMeters: 3000,
+    description: "徒歩困難な広域空白地〜車約10分圏。雨天時やまとめ買い・通院",
+  },
+  {
+    id: "custom",
+    label: "自由設定",
+    icon: "⚙️",
+    minMeters: 400,
+    maxMeters: 2000,
+    description: "任意の最小・最大距離を指定して救済範囲を検証",
+  },
+];
+
+export type MobilityHubBuildingRecord = {
+  buildingId: string;
+  lat: number;
+  lng: number;
+  baseCoverageRatio: number;
+  totalFloorArea: number | null;
+  baseBusEffectiveDistanceMeters: number;
+  usage?: string;
+};
+
+export type MobilityHubBuildingOutcome = {
+  isCoveredByHub: boolean;
+  nearestHubId: number | null;
+  nearestHubName: string | null;
+  hubDistanceMeters: number;
+  mode?: MobilityHubMode;
+  modeLabel?: string;
+};
+
+export type MobilityHubSiteConfig = {
+  hubId: number;
+  mode: MobilityHubMode;
+  minDistanceMeters: number;
+  maxDistanceMeters: number;
+};
+
+export type MobilityHubPerSiteStat = {
+  hubId: number;
+  name: string;
+  address: string;
+  coveredBuildings: number;
+  appliedMode?: MobilityHubMode;
+  modeLabel?: string;
+  minMeters?: number;
+  maxMeters?: number;
+};
+
+export type MobilityHubSimulationSummary = {
+  activeHubCount: number;
+  selectedMode: MobilityHubMode;
+  minDistanceMeters: number;
+  maxDistanceMeters: number;
+  totalGapBuildingsBefore: number;
+  newlyCoveredBuildings: number;
+  newlyCoveredFloorArea: number;
+  severeGapBeforeBuildings: number;
+  severeGapCoveredBuildings: number;
+  perHubStats: MobilityHubPerSiteStat[];
+};
+
+/**
+ * モビリティ・ハブ検討シミュレーション。
+ * 交通空白地（カバー率>1）の住宅のうち、選択されたハブ候補地から
+ * 指定の距離範囲（minMeters〜maxMeters、またはハブ個別設定）に位置する建物を抽出・集計する。
+ */
+export function evaluateMobilityHubSimulation(
+  buildings: Iterable<MobilityHubBuildingRecord>,
+  activeHubs: MobilityHubSite[],
+  minDistanceMeters: number,
+  maxDistanceMeters: number,
+  mode: MobilityHubMode,
+  hubConfigs?: Map<number, MobilityHubSiteConfig>
+): {
+  outcomes: Map<string, MobilityHubBuildingOutcome>;
+  summary: MobilityHubSimulationSummary;
+} {
+  const outcomes = new Map<string, MobilityHubBuildingOutcome>();
+  const hubCounts = new Map<number, number>();
+  for (const hub of activeHubs) {
+    hubCounts.set(hub.id, 0);
+  }
+
+  let totalGapBuildingsBefore = 0;
+  let newlyCoveredBuildings = 0;
+  let newlyCoveredFloorArea = 0;
+  let severeGapBeforeBuildings = 0;
+  let severeGapCoveredBuildings = 0;
+
+  for (const b of buildings) {
+    const isGapBefore = b.baseCoverageRatio > 1;
+    if (!isGapBefore) continue;
+
+    totalGapBuildingsBefore++;
+    const isSevere = b.baseCoverageRatio > 1.5;
+    if (isSevere) severeGapBeforeBuildings++;
+
+    if (activeHubs.length === 0) continue;
+
+    let bestCoveringHub: {
+      hubId: number;
+      hubName: string;
+      dist: number;
+      mode: MobilityHubMode;
+      modeLabel: string;
+    } | null = null;
+    let minCoveringDist = Infinity;
+
+    for (const hub of activeHubs) {
+      const cfg = hubConfigs?.get(hub.id);
+      const hubMin = cfg ? cfg.minDistanceMeters : minDistanceMeters;
+      const hubMax = cfg ? cfg.maxDistanceMeters : maxDistanceMeters;
+      const hubMode = cfg ? cfg.mode : mode;
+
+      // 道路網の蛇行等を考慮した標準迂回係数 1.2
+      const dist = haversineMeters(b.lat, b.lng, hub.lat, hub.lng) * 1.2;
+      if (dist >= hubMin && dist <= hubMax) {
+        if (dist < minCoveringDist) {
+          minCoveringDist = dist;
+          const modeDef = MOBILITY_HUB_MODES.find((m) => m.id === hubMode);
+          bestCoveringHub = {
+            hubId: hub.id,
+            hubName: hub.name,
+            dist,
+            mode: hubMode,
+            modeLabel: modeDef?.label ?? "自由設定",
+          };
+        }
+      }
+    }
+
+    if (bestCoveringHub) {
+      newlyCoveredBuildings++;
+      if (b.totalFloorArea != null && Number.isFinite(b.totalFloorArea)) {
+        newlyCoveredFloorArea += b.totalFloorArea;
+      }
+      if (isSevere) {
+        severeGapCoveredBuildings++;
+      }
+      hubCounts.set(bestCoveringHub.hubId, (hubCounts.get(bestCoveringHub.hubId) ?? 0) + 1);
+
+      outcomes.set(b.buildingId, {
+        isCoveredByHub: true,
+        nearestHubId: bestCoveringHub.hubId,
+        nearestHubName: bestCoveringHub.hubName,
+        hubDistanceMeters: bestCoveringHub.dist,
+        mode: bestCoveringHub.mode,
+        modeLabel: bestCoveringHub.modeLabel,
+      });
+    }
+  }
+
+  const perHubStats: MobilityHubPerSiteStat[] = activeHubs.map((hub) => {
+    const cfg = hubConfigs?.get(hub.id);
+    const hubMode = cfg ? cfg.mode : mode;
+    const modeDef = MOBILITY_HUB_MODES.find((m) => m.id === hubMode);
+    return {
+      hubId: hub.id,
+      name: hub.name,
+      address: hub.address,
+      coveredBuildings: hubCounts.get(hub.id) ?? 0,
+      appliedMode: hubMode,
+      modeLabel: modeDef?.label ?? "自由設定",
+      minMeters: cfg ? cfg.minDistanceMeters : minDistanceMeters,
+      maxMeters: cfg ? cfg.maxDistanceMeters : maxDistanceMeters,
+    };
+  });
+
+  return {
+    outcomes,
+    summary: {
+      activeHubCount: activeHubs.length,
+      selectedMode: mode,
+      minDistanceMeters,
+      maxDistanceMeters,
+      totalGapBuildingsBefore,
+      newlyCoveredBuildings,
+      newlyCoveredFloorArea,
+      severeGapBeforeBuildings,
+      severeGapCoveredBuildings,
+      perHubStats,
+    },
+  };
+}
+
+export type MobilityHubCoveredBuildingExportItem = {
+  buildingId: string;
+  lat: number;
+  lng: number;
+  usage?: string;
+  totalFloorArea?: number | null;
+  nearestHubName: string;
+  hubDistanceMeters: number;
+  originalBusDistanceMeters: number;
+  appliedModeLabel?: string;
+};
+
+export function buildMobilityHubSimulationGeoJson(params: {
+  hubs: MobilityHubSite[];
+  modeLabel: string;
+  minDistanceMeters: number;
+  maxDistanceMeters: number;
+  coveredBuildings: MobilityHubCoveredBuildingExportItem[];
+}): SimulationGeoJson {
+  const features: SimulationGeoJsonFeature[] = [];
+
+  for (const hub of params.hubs) {
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [Number(hub.lng.toFixed(6)), Number(hub.lat.toFixed(6))],
+      },
+      properties: {
+        feature_type: "mobility_hub_candidate",
+        hub_id: hub.id,
+        name: hub.name,
+        address: hub.address,
+        description: hub.description,
+        applied_mode: params.modeLabel,
+        distance_range_m: `${params.minDistanceMeters}m - ${params.maxDistanceMeters}m`,
+      },
+    });
+  }
+
+  for (const b of params.coveredBuildings) {
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [Number(b.lng.toFixed(6)), Number(b.lat.toFixed(6))],
+      },
+      properties: {
+        feature_type: "hub_rescued_gap_building",
+        building_id: b.buildingId,
+        usage: b.usage ?? "不明",
+        total_floor_area_sqm:
+          b.totalFloorArea != null && Number.isFinite(b.totalFloorArea)
+            ? Math.round(b.totalFloorArea * 10) / 10
+            : null,
+        assigned_hub: b.nearestHubName,
+        hub_distance_m: Math.round(b.hubDistanceMeters),
+        original_bus_distance_m: Math.round(b.originalBusDistanceMeters),
+        applied_mode: b.appliedModeLabel ?? params.modeLabel,
+      },
+    });
+  }
+
+  return {
+    type: "FeatureCollection",
+    name: "plateau_mobility_hub_simulation",
+    crs: {
+      type: "name",
+      properties: {
+        name: "urn:ogc:def:crs:OGC:1.3:CRS84",
+      },
+    },
+    features,
+  };
+}
+
 
 
