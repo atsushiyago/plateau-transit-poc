@@ -2625,16 +2625,15 @@ export default function PlateauViewer() {
             label: {
               text: place.name,
               font: "bold 16px sans-serif",
-              // バス停ピンの半透明色と同じ理由（背景の建物・地表色と合成されて薄く見えてしまう）で、
-              // 塗り・縁取りとも不透明にしている。
               fillColor: Cesium.Color.WHITE,
               outlineColor: Cesium.Color.BLACK,
-              outlineWidth: 4,
+              outlineWidth: 2,
               style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              // アイコンピン（32x32px）と座標が一致してもアイコンを隠さないよう、
+              // 文字をアンカー位置より下（足元側）にオフセットして表示する。
+              verticalOrigin: Cesium.VerticalOrigin.TOP,
+              pixelOffset: new Cesium.Cartesian2(0, 18),
               heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-              // デマンド交通候補ピンと同じ理由（密集市街地で3D Tiles建物の陰に隠れるのを防ぐ）で
-              // 深度テストを無効化し、常に手前に表示する。
               disableDepthTestDistance: Number.POSITIVE_INFINITY,
             },
           });
@@ -2745,6 +2744,7 @@ export default function PlateauViewer() {
             verticalOrigin: Cesium.VerticalOrigin.CENTER,
             heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            eyeOffset: new Cesium.Cartesian3(0, 0, -100),
           },
         });
         mobilityHubEntities.push({ hub, entity });
@@ -3179,6 +3179,7 @@ export default function PlateauViewer() {
             verticalOrigin: Cesium.VerticalOrigin.CENTER,
             heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            eyeOffset: new Cesium.Cartesian3(0, 0, -100),
           },
         });
         customStops.push({
