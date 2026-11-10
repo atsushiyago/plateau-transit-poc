@@ -693,7 +693,7 @@ function Legend({
       {!isCollapsed && (
         <>
           <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-            鉄道駅800m／バス停400mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。バスは神奈川中央交通のみ、駅は代表点を使用し、運行頻度は考慮していません。
+            鉄道駅800m／バス停400mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。駅は代表点を使用し、運行頻度は考慮していません。
           </div>
       {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
