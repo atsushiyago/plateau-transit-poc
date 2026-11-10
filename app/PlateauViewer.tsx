@@ -35,6 +35,7 @@ import {
 import { NetworkRouter, type RoutingGraph } from "./lib/network-routing";
 import { TileWorkGate } from "./lib/async-generation";
 import type { AnalysisResponse } from "./workers/transit-analysis.worker";
+import { SlopeCalculationModal } from "./SlopeCalculationModal";
 import { useEffect, useRef, useState, useCallback, type ReactNode } from "react";
 import * as Cesium from "cesium";
 
@@ -620,6 +621,7 @@ function Legend({
   // 折りたたみ見出しのホバー時ハイライト用。クリック可能であることを視覚的に伝えるため
   // （見出しだけを見てもクリックできると分かりにくい、という指摘への対応）。
   const [experimentalHeaderHovered, setExperimentalHeaderHovered] = useState(false);
+  const [showSlopeCalculationModal, setShowSlopeCalculationModal] = useState(false);
   return (
     <div
       style={{
@@ -741,7 +743,33 @@ function Legend({
         </div>
       )}
       <div style={{ marginTop: 4 }}>
-        <div style={{ opacity: 0.85, marginBottom: 2 }}>勾配・歩行速度のプロファイル:</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
+          <span style={{ opacity: 0.85 }}>勾配・歩行速度のプロファイル:</span>
+          <button
+            type="button"
+            onClick={() => setShowSlopeCalculationModal(true)}
+            style={{
+              background: "rgba(56, 189, 248, 0.18)",
+              border: "1px solid rgba(56, 189, 248, 0.45)",
+              color: "#38bdf8",
+              borderRadius: 4,
+              fontSize: 10.5,
+              padding: "1px 6px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 3,
+              lineHeight: 1.4,
+              transition: "all 0.15s ease",
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(56, 189, 248, 0.3)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(56, 189, 248, 0.18)")}
+            title="勾配ペナルティ係数と上り坂割増の計算根拠を見る"
+          >
+            <span style={{ fontSize: 11 }}>ℹ️</span>
+            <span>計算のしくみ</span>
+          </button>
+        </div>
         {(Object.keys(WALK_PROFILES) as WalkProfile[]).map((key) => (
           <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
             <input
@@ -1133,6 +1161,10 @@ function Legend({
       )}
         </>
       )}
+      <SlopeCalculationModal
+        isOpen={showSlopeCalculationModal}
+        onClose={() => setShowSlopeCalculationModal(false)}
+      />
     </div>
   );
 }
