@@ -104,7 +104,7 @@ export function SlopeCalculationModal({ isOpen, onClose }: SlopeCalculationModal
         <div style={{ padding: "16px 20px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
           {/* 概要 */}
           <div style={{ background: "rgba(56, 189, 248, 0.08)", border: "1px solid rgba(56, 189, 248, 0.2)", borderRadius: 6, padding: "10px 14px", color: "#e0f2fe", fontSize: 12.5 }}>
-            本システムでは、単なる平面直線距離ではなく、地形の標高差（勾配）や歩行者の体力特性を考慮して「実際の体感負担（実効歩行距離）」を推計しています。2つの主要係数はそれぞれ<strong>「誰が歩くか（人の体力差）」</strong>と<strong>「上りか下りか（向きと地域の過酷さ）」</strong>という異なる役割を担っています。
+            本システムでは、単なる平面直線距離ではなく、地形の標高差（勾配）や歩行者の体力特性を考慮して「実際の体感負担（実効歩行距離）」を推計しています。2つの主要係数はそれぞれ<strong>「誰が歩くか（人の体力差）」</strong>と<strong>「上り・下りと地域の過酷さ」</strong>という異なる役割を担っています。
           </div>
 
           {/* 1. 一言でいうと（表） */}
@@ -126,12 +126,14 @@ export function SlopeCalculationModal({ isOpen, onClose }: SlopeCalculationModal
                   <td style={{ padding: "8px 10px", color: "#7dd3fc" }}>「人の体力差」</td>
                   <td style={{ padding: "8px 10px", color: "#cbd5e1" }}>
                     坂の斜度（キツさ）にどれだけ敏感か<br />
-                    <span style={{ fontSize: 11, color: "#94a3b8" }}>（高齢者は一般成人の2倍、坂道で疲れやすい）</span>
+                    <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                      （運動生理学の知見※に基づき、登坂時のエネルギー消費・筋力負荷が一般成人の約2倍となる身体特性を反映）
+                    </span>
                   </td>
                 </tr>
                 <tr>
                   <td style={{ padding: "8px 10px", fontWeight: "bold", color: "#f1f5f9" }}>② 上り坂の割増倍率</td>
-                  <td style={{ padding: "8px 10px", color: "#fdba74" }}>「歩く向きと地域の過酷さ」</td>
+                  <td style={{ padding: "8px 10px", color: "#7dd3fc" }}>「上り・下りと地域の過酷さ」</td>
                   <td style={{ padding: "8px 10px", color: "#cbd5e1" }}>
                     下り坂と比べ、上り坂をどれだけ重くみるか<br />
                     <span style={{ fontSize: 11, color: "#94a3b8" }}>（重力に逆らう上り坂や団地特有の坂道に対する割増）</span>
@@ -139,6 +141,9 @@ export function SlopeCalculationModal({ isOpen, onClose }: SlopeCalculationModal
                 </tr>
               </tbody>
             </table>
+            <div style={{ fontSize: 10.5, color: "#64748b", marginTop: 4, lineHeight: 1.4 }}>
+              ※運動生理学・リハビリテーション分野等の研究において、高齢者の坂道登坂時のエネルギー消費（METs）や身体負荷は若年成人の約1.8〜2.2倍に跳ね上がることが示されている知見を参考に設定。
+            </div>
           </div>
 
           {/* 2. 計算式 */}
@@ -186,8 +191,11 @@ export function SlopeCalculationModal({ isOpen, onClose }: SlopeCalculationModal
                 </div>
                 <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid rgba(255, 255, 255, 0.08)", fontSize: 12 }}>
                   <div style={{ color: "#94a3b8", fontSize: 11 }}>100m登ったときの実効距離:</div>
+                  <div style={{ fontFamily: "monospace", fontSize: 11, color: "#cbd5e1", marginTop: 2 }}>
+                    100m × (1 + 3.0 × 1.25 × 0.10)
+                  </div>
                   <div style={{ fontWeight: "bold", color: "#38bdf8", fontSize: 14 }}>
-                    100m × 1.375 = 約138m
+                    = 約138m
                   </div>
                   <div style={{ fontSize: 11, color: "#94a3b8" }}>平地と比べて約1.38倍の距離負担</div>
                 </div>
@@ -205,8 +213,11 @@ export function SlopeCalculationModal({ isOpen, onClose }: SlopeCalculationModal
                 </div>
                 <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid rgba(255, 255, 255, 0.08)", fontSize: 12 }}>
                   <div style={{ color: "#94a3b8", fontSize: 11 }}>100m登ったときの実効距離:</div>
+                  <div style={{ fontFamily: "monospace", fontSize: 11, color: "#cbd5e1", marginTop: 2 }}>
+                    100m × (1 + 6.0 × 1.25 × 0.10)
+                  </div>
                   <div style={{ fontWeight: "bold", color: "#fbbf24", fontSize: 14 }}>
-                    100m × 1.750 = 約175m
+                    = 約175m
                   </div>
                   <div style={{ fontSize: 11, color: "#94a3b8" }}>平地と比べて約1.75倍の距離負担</div>
                 </div>
