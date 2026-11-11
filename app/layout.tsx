@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'PLATEAU 交通空白地 PoC',
-  description: 'PLATEAU CityHack Challenge 2026 用 藤沢市北部・交通空白地 PoC',
+  title: 'PLATEAU 交通空白地可視化・施策シミュレーション（藤沢市北部）',
+  description: 'PLATEAU 3D都市モデルを用いた藤沢市北部エリアの交通空白地可視化および停留所・モビリティ・ハブ施策シミュレーション',
   verification: {
     google: 'lEwWrnQDGdebu0V7ZBAU0KxIAdoKAiuQqiS7jf22T88',
   },

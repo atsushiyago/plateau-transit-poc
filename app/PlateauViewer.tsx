@@ -654,7 +654,7 @@ function Legend({
           onClick={onToggleCollapsed}
           style={{ cursor: "pointer", flex: 1, userSelect: "none" }}
         >
-          <div style={{ fontWeight: "bold", fontSize: 13 }}>藤沢市の距離基準を参考にした独自推計</div>
+          <div style={{ fontWeight: "bold", fontSize: 13 }}>藤沢市北部 交通空白地推計</div>
           {isCollapsed && (
             <div
               style={{
@@ -695,7 +695,7 @@ function Legend({
       {!isCollapsed && (
         <>
           <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
-            鉄道駅800m／バス停400mを参考に、独自の傾斜補正を加えて判定。藤沢市の公式判定そのものではありません。 交通施設は市境・東海道線の外側も含む周辺矩形から抽出。駅は代表点を使用し、運行頻度は考慮していません。
+            鉄道駅800m／バス停400mを参考に、地形勾配と歩行負荷の補正を加えて判定しています（市の公式判定そのものではありません）。交通施設は市境・東海道線の外側も含む周辺矩形から抽出。駅は代表点を使用し、運行頻度は考慮していません。
           </div>
       {COVERAGE_RANKS.map((rank) => (
         <div key={rank.legendLabel} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
@@ -815,7 +815,7 @@ function Legend({
           <span style={{ fontSize: 13, color: "#6ecbf5", fontWeight: "bold", lineHeight: 1 }}>
             {showExperimentalDistanceModel ? "▼" : "▶"}
           </span>
-          <span style={{ opacity: 0.9 }}>距離モデル（実験的機能・クリックで詳細）</span>
+          <span style={{ opacity: 0.9 }}>距離モデル（直線／道路網・クリックで詳細）</span>
         </div>
         {showExperimentalDistanceModel && (
           <>
@@ -3779,7 +3779,7 @@ export default function PlateauViewer() {
               coverageRatio,
               isCovered: coverageRatio <= 1,
               totalFloorArea: c.totalFloorArea,
-              walkProfileLabel: `${profile.label}（道路網距離モデル・実験的）`,
+              walkProfileLabel: `${profile.label}（道路網距離モデル）`,
             };
             recordScore(c.feature, c.buildingId, info);
           }
