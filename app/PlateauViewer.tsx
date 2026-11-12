@@ -2429,6 +2429,7 @@ export default function PlateauViewer() {
   const reapplyMobilityHubScoresRef = useRef<(() => void) | null>(null);
   const flyToMobilityHubRef = useRef<((hubId: number) => void) | null>(null);
   const exportMobilityHubGeoJsonRef = useRef<(() => void) | null>(null);
+  const flyToInitialViewRef = useRef<((durationSec?: number) => void) | null>(null);
 
   useEffect(() => {
     customStopSummaryRef.current = customStopSummary;
@@ -2482,21 +2483,22 @@ export default function PlateauViewer() {
   };
 
   const handleToggleMobilityHubActive = () => {
-    setIsMobilityHubActive((prev) => {
-      const next = !prev;
-      isMobilityHubActiveRef.current = next;
-      if (next) {
-        setIsLegendCollapsed(true);
-        if (isAddingCustomStopRef.current) {
-          setIsAddingCustomStop(false);
-          isAddingCustomStopRef.current = false;
-        }
-      } else {
-        setIsLegendCollapsed(false);
+    const next = !isMobilityHubActiveRef.current;
+    isMobilityHubActiveRef.current = next;
+    setIsMobilityHubActive(next);
+    if (next) {
+      setIsLegendCollapsed(true);
+      if (isAddingCustomStopRef.current) {
+        setIsAddingCustomStop(false);
+        isAddingCustomStopRef.current = false;
       }
-      reapplyMobilityHubScoresRef.current?.();
-      return next;
-    });
+      // 別エリアへ移動した状態からでも4つの実証候補地が確実に画面内に入るよう、
+      // モビリティ・ハブ検討を開始したタイミングで地図の表示位置を初期視点へリセットする。
+      flyToInitialViewRef.current?.(1.0);
+    } else {
+      setIsLegendCollapsed(false);
+    }
+    reapplyMobilityHubScoresRef.current?.();
   };
 
   const handleCloseMobilityHub = () => {
@@ -4268,19 +4270,24 @@ export default function PlateauViewer() {
         }
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-      // 起動時のカメラ視点を設定（BoundingSphereで中心点と半径を合わせる）。
-      const center = Cesium.Cartesian3.fromDegrees(
-        INITIAL_VIEW_CENTER_LNG,
-        INITIAL_VIEW_CENTER_LAT
-      );
-      const sphere = new Cesium.BoundingSphere(center, INITIAL_VIEW_RADIUS_METERS);
-      viewer.camera.flyToBoundingSphere(sphere, {
-        offset: new Cesium.HeadingPitchRange(
-          Cesium.Math.toRadians(INITIAL_VIEW_HEADING),
-          Cesium.Math.toRadians(INITIAL_VIEW_PITCH)
-        ),
-        duration: 0,
-      });
+      // 起動時およびリセット時のカメラ視点を設定（BoundingSphereで中心点と半径を合わせる）。
+      function flyToInitialView(duration = 0) {
+        const center = Cesium.Cartesian3.fromDegrees(
+          INITIAL_VIEW_CENTER_LNG,
+          INITIAL_VIEW_CENTER_LAT
+        );
+        const sphere = new Cesium.BoundingSphere(center, INITIAL_VIEW_RADIUS_METERS);
+        viewer.camera.flyToBoundingSphere(sphere, {
+          offset: new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(INITIAL_VIEW_HEADING),
+            Cesium.Math.toRadians(INITIAL_VIEW_PITCH)
+          ),
+          duration,
+        });
+      }
+
+      flyToInitialViewRef.current = flyToInitialView;
+      flyToInitialView(0);
     }
 
     init();
@@ -4302,6 +4309,7 @@ export default function PlateauViewer() {
       reapplyMobilityHubScoresRef.current = null;
       flyToMobilityHubRef.current = null;
       exportMobilityHubGeoJsonRef.current = null;
+      flyToInitialViewRef.current = null;
       helloCyclingEntitiesRef.current = [];
       viewerRef.current?.destroy();
       viewerRef.current = null;
