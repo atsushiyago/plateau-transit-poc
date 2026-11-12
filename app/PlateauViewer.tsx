@@ -503,6 +503,71 @@ function pickGroundLatLng(
   };
 }
 
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+    types?: Array<{
+      description?: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<{
+    createWritable: () => Promise<{
+      write: (data: Blob) => Promise<void>;
+      close: () => Promise<void>;
+    }>;
+  }>;
+};
+
+function formatExportTimestamp(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+/**
+ * GeoJSONデータをファイル保存する。
+ * 対応ブラウザ（Chrome / Edge 等）では保存先・ファイル名を選択できるOSダイアログを開き、
+ * 非対応ブラウザ（Safari / Firefox 等）では従来のダウンロード方式へフォールバックする。
+ */
+async function saveGeoJsonFile(geoJson: unknown, fileName: string): Promise<void> {
+  const jsonStr = JSON.stringify(geoJson, null, 2);
+  const blob = new Blob([jsonStr], { type: "application/geo+json;charset=utf-8" });
+  const picker = (window as SaveFilePickerWindow).showSaveFilePicker;
+
+  if (typeof picker === "function") {
+    try {
+      const handle = await picker({
+        suggestedName: fileName,
+        types: [
+          {
+            description: "GeoJSON ファイル",
+            accept: { "application/json": [".geojson"] },
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (err) {
+      // ユーザーが保存ダイアログをキャンセルした場合は何もせず終了する
+      if ((err as { name?: unknown } | null)?.name === "AbortError") {
+        return;
+      }
+      // 制限環境等でダイアログが開けない場合のみ従来方式へフォールバックする
+      console.warn("showSaveFilePicker での保存に失敗したため、通常ダウンロードへ切り替えます:", err);
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 type PopupInfo = { title: string; lines: ReactNode[] };
 
 // Cesium標準のinfoBox/selectionIndicatorは無効化している（下記Viewer初期化オプション参照）ため、
@@ -1001,7 +1066,7 @@ function Legend({
             boxShadow: isAddingCustomStop ? "0 0 8px rgba(56, 189, 248, 0.6)" : "none",
           }}
         >
-          {isAddingCustomStop ? "📍 追加モード中（クリックで配置 / 終了）" : "＋ 地図クリックで停留所を追加"}
+          {isAddingCustomStop ? "追加モード中（クリックで配置 / 終了）" : "地図クリックで停留所を追加"}
         </button>
         {customStopCount > 0 && (
           <div style={{ marginTop: 6, fontSize: 11, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
@@ -1076,7 +1141,7 @@ function Legend({
         }}
       >
         <div style={{ fontWeight: "bold", color: "#fbbf24", fontSize: 12.5, letterSpacing: "0.02em" }}>
-          🚲 モビリティ・ハブ検討（実証候補地）
+          モビリティ・ハブ検討（実証候補地）
         </div>
         <div style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 3 }}>
           藤沢市が実証検討中の候補地4箇所（大庭・遠藤）にシェアサイクル等を導入した場合の救済効果を試算します。
@@ -1100,7 +1165,7 @@ function Legend({
             boxShadow: isMobilityHubActive ? "0 0 8px rgba(245, 158, 11, 0.6)" : "none",
           }}
         >
-          {isMobilityHubActive ? "🚲 ハブ検討中（パネルを表示中）" : "🚲 モビリティ・ハブ検討を開始"}
+          {isMobilityHubActive ? "ハブ検討中（パネルを表示中）" : "モビリティ・ハブ検討を開始"}
         </button>
         {isMobilityHubActive && mobilityHubRescuedCount != null && mobilityHubRescuedCount > 0 && (
           <div style={{ marginTop: 6, fontSize: 11, color: "#fef3c7" }}>
@@ -1308,7 +1373,7 @@ function CustomStopSimulationPanel({
                 cursor: "pointer",
               }}
             >
-              {isAddingCustomStop ? "📍 ピン配置モード中（配置を完了する）" : "＋ 地図クリックで停留所を追加"}
+              {isAddingCustomStop ? "ピン配置モード中（配置を完了する）" : "地図クリックで停留所を追加"}
             </button>
           </div>
 
@@ -1412,7 +1477,6 @@ function CustomStopSimulationPanel({
                       gap: 6,
                     }}
                   >
-                    <span>📥</span>
                     <span>シミュレーション結果を出力 (GeoJSON)</span>
                   </button>
                 )}
@@ -3331,19 +3395,8 @@ export default function PlateauViewer() {
           newlyCoveredBuildings,
         });
 
-        const jsonStr = JSON.stringify(geoJson, null, 2);
-        const blob = new Blob([jsonStr], { type: "application/geo+json;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        a.href = url;
-        a.download = `plateau_simulation_${timestamp}.geojson`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        const timestamp = formatExportTimestamp();
+        void saveGeoJsonFile(geoJson, `plateau_simulation_${timestamp}.geojson`);
       }
 
       removeCustomStopRef.current = removeCustomStop;
@@ -3424,19 +3477,11 @@ export default function PlateauViewer() {
           coveredBuildings,
         });
 
-        const jsonStr = JSON.stringify(geoJson, null, 2);
-        const blob = new Blob([jsonStr], { type: "application/geo+json;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        a.href = url;
-        a.download = `mobility_hub_simulation_${modeKey}_${minMeters}m-${maxMeters}m_${timestamp}.geojson`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        const timestamp = formatExportTimestamp();
+        void saveGeoJsonFile(
+          geoJson,
+          `mobility_hub_simulation_${modeKey}_${minMeters}m-${maxMeters}m_${timestamp}.geojson`
+        );
       }
 
       function flyToMobilityHub(hubId: number) {
