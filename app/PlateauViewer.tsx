@@ -1045,7 +1045,7 @@ function Legend({
           エリア対策シミュレーション（自由配置）
         </div>
         <div style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 3 }}>
-          対策したい空白地エリアの任意の場所に停留所を複数置いて、カバー建物の変化を確認できます。
+          地図をクリックして任意の場所に停留所を複数配置し、カバー建物の変化を確認できます。
         </div>
         <button
           type="button"
@@ -1066,7 +1066,7 @@ function Legend({
             boxShadow: isAddingCustomStop ? "0 0 8px rgba(56, 189, 248, 0.6)" : "none",
           }}
         >
-          {isAddingCustomStop ? "追加モード中（クリックで配置 / 終了）" : "地図クリックで停留所を追加"}
+          {isAddingCustomStop ? "シミュレーション中（パネルを表示中）" : "エリア対策シミュレーションを開始"}
         </button>
         {customStopCount > 0 && (
           <div style={{ marginTop: 6, fontSize: 11, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
