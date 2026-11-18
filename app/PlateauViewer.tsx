@@ -157,7 +157,7 @@ const WALK_PROFILE_DEFAULT: WalkProfile = "general";
 // のでは、という丹野氏からの指摘（2026年8月）を受けて追加。道路網距離モデルの閾値にだけ
 // 調整可能な倍率をかけられるようにする（直線距離モデルは藤沢市公式定義との比較用の
 // ベースラインとして、常に固定の400m/800mのまま変更しない）。
-const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.2;
+const NETWORK_THRESHOLD_MULTIPLIER_DEFAULT = 1.4;
 
 // 建物ごとの「カバー率」= min(バス実効距離/BUS_COVERAGE_THRESHOLD_METERS, 駅実効距離/
 // STATION_COVERAGE_THRESHOLD_METERS)。閾値の単位（400m/800m）が異なる駅・バスの2つの基準を
