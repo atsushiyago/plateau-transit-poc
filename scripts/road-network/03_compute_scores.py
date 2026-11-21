@@ -25,7 +25,8 @@ def main():
     buildings = json.loads(Path(args.buildings_file).read_text())
     if args.limit:
         buildings = buildings[:args.limit]
-    stops = [s for s in json.loads((DATA/'analysis-facilities.json').read_text())['busStops'] if '神奈川中央交通' in s['operator']]
+    major_operators = ('神奈川中央交通', '江ノ電バス')
+    stops = [s for s in json.loads((DATA/'analysis-facilities.json').read_text())['busStops'] if any(k in s['operator'] for k in major_operators)]
     stations = json.loads((DATA/'analysis-facilities.json').read_text())['stations']
     graph = ox.load_graphml(SCRIPT_DIR/'road_network.graphml').to_undirected()
     snapper = EdgeSnapper(graph)

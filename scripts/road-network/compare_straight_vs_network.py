@@ -16,7 +16,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 BUS_STOPS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
 TRAIN_STATIONS_JSON = REPO_ROOT / "public" / "data" / "analysis-facilities.json"
 
-MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通"]
+MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通", "江ノ電バス"]
 BUS_COVERAGE_THRESHOLD_METERS = 300
 STATION_COVERAGE_THRESHOLD_METERS = 600
 SLOPE_GRADIENT_CAP = 0.4

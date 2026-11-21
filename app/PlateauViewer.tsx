@@ -92,7 +92,7 @@ const INITIAL_VIEW_PITCH = -34.7;
 // P11データのバス事業者名（P11_002）は藤沢市北部エリアでは「神奈川中央交通（株）」の表記で
 // 統一されている（表記ゆれ無し。実データで確認済み）が、将来のデータ更新で法人格表記
 // （（株）の位置等）が変わる可能性を考慮し、部分一致で判定する。
-const MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通"];
+const MAJOR_OPERATOR_KEYWORDS = ["神奈川中央交通", "江ノ電バス"];
 function isMajorOperatorStop(stop: BusStop): boolean {
   return MAJOR_OPERATOR_KEYWORDS.some((keyword) => stop.operator.includes(keyword));
 }
@@ -950,7 +950,7 @@ function Legend({
             flexShrink: 0,
           }}
         />
-        <span>バス停（神奈川中央交通。色分け計算に使用）</span>
+        <span>バス停（神奈川中央交通・江ノ電バス。色分け計算に使用）</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <span
