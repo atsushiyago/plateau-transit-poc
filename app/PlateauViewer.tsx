@@ -577,8 +577,8 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
     <div
       style={{
         position: "absolute",
-        left: 12,
-        bottom: 12,
+        right: 12,
+        top: 12,
         zIndex: 15,
         background: "rgba(20, 20, 20, 0.9)",
         color: "#fff",
@@ -588,6 +588,8 @@ function InfoPopup({ info, onClose }: { info: PopupInfo; onClose: () => void }) 
         lineHeight: 1.6,
         fontFamily: "sans-serif",
         maxWidth: 320,
+        maxHeight: "calc(100vh - 110px)",
+        overflowY: "auto",
         boxShadow: "0 4px 16px rgba(0, 0, 0, 0.5)",
         border: "1px solid rgba(255, 255, 255, 0.15)",
       }}
@@ -2510,6 +2512,7 @@ export default function PlateauViewer() {
   const reapplyCustomStopScoresRef = useRef<(() => void) | null>(null);
   const exportCustomStopSimulationGeoJsonRef = useRef<(() => void) | null>(null);
   const warmUpRoutingGraphRef = useRef<(() => void) | null>(null);
+  const clearRouteComparisonRef = useRef<(() => void) | null>(null);
   const snapRoadWarmupPromiseRef = useRef<Promise<void> | null>(null);
   const customStopSummaryRef = useRef<CustomStopSimulationSummary | null>(null);
 
@@ -2522,6 +2525,17 @@ export default function PlateauViewer() {
   useEffect(() => {
     customStopSummaryRef.current = customStopSummary;
   }, [customStopSummary]);
+
+  const isSimulationPanelVisible =
+    isAddingCustomStop || (customStopSummary?.stopCount ?? 0) > 0 || isMobilityHubActive;
+
+  useEffect(() => {
+    if (!isSimulationPanelVisible) return;
+    ++popupRequestRef.current;
+    candidatePopupRef.current = false;
+    setPopup(null);
+    clearRouteComparisonRef.current?.();
+  }, [isSimulationPanelVisible]);
 
   const handleSelectMobilityHubMode = (mode: MobilityHubMode) => {
     setMobilityHubMode(mode);
@@ -2954,6 +2968,18 @@ export default function PlateauViewer() {
       let networkScoreMap: Map<string, BuildingNetworkScoreRow> | null = null;
       let routingGraphCache: RoutingGraph | null = null;
       let routingGraphPromise: Promise<RoutingGraph | null> | null = null;
+      let cachedRouteInspectRouter: { profile: WalkProfile; router: NetworkRouter } | null = null;
+      let routeComparisonEntities: Cesium.Entity[] = [];
+
+      function clearRouteComparisonEntities() {
+        if (routeComparisonEntities.length === 0) return;
+        for (const entity of routeComparisonEntities) {
+          viewer.entities.remove(entity);
+        }
+        routeComparisonEntities = [];
+        viewer.scene.requestRender();
+      }
+      clearRouteComparisonRef.current = clearRouteComparisonEntities;
       // 成功した世代だけ処理済みとし、失敗はバックオフ後にtileVisibleから再試行する。
       const tileWork = new TileWorkGate<Cesium.Cesium3DTile>();
 
@@ -4037,6 +4063,7 @@ export default function PlateauViewer() {
       }
       async function applyWalkProfile(profile: WalkProfile) {
         walkProfileRef.current = profile;
+        clearRouteComparisonEntities();
         const generation = invalidateScores();
         await new Promise<void>(resolve => window.setTimeout(resolve, 800));
         if (!cancelled && generation === tileWork.generation) setCenterLoading(null);
@@ -4044,6 +4071,7 @@ export default function PlateauViewer() {
       applyWalkProfileRef.current = profile => { void applyWalkProfile(profile); };
       async function applyDistanceModel(model: DistanceModel) {
         distanceModelRef.current = model;
+        clearRouteComparisonEntities();
         const generation = invalidateScores();
         if (model === 'network') {
           const scores = await ensureNetworkScoreMap();
@@ -4067,6 +4095,7 @@ export default function PlateauViewer() {
         removeLoad?.(); removeVisible?.(); removeUnload?.();
         clickHandler.destroy();
         analysisWorker?.terminate();
+        clearRouteComparisonEntities();
         if (demandTransitRecomputeTimer) clearTimeout(demandTransitRecomputeTimer);
         if (demandTransitAnalysisTimer) clearTimeout(demandTransitAnalysisTimer);
         if (customStopEvalTimer) clearTimeout(customStopEvalTimer);
@@ -4080,6 +4109,7 @@ export default function PlateauViewer() {
       clickHandler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
         ++popupRequestRef.current;
         candidatePopupRef.current = false;
+        clearRouteComparisonEntities();
         const picked = viewer.scene.pick(movement.position);
         const entity = picked?.id;
 
@@ -4351,6 +4381,7 @@ export default function PlateauViewer() {
         } else if (picked instanceof Cesium.Cesium3DTileFeature) {
           const info = featureScoreMap.get(picked);
           if (info) {
+            const requestId = popupRequestRef.current;
             const hubImp = info.mobilityHubImprovement;
             const imp = info.customStopImprovement;
             const statusNode: ReactNode = hubImp ? (
@@ -4364,33 +4395,141 @@ export default function PlateauViewer() {
             ) : (
               `判定: ${info.isCovered ? "カバーされている" : "交通空白地"}`
             );
+            const buildBuildingPopupLines = (routeComparisonNode?: ReactNode): ReactNode[] => [
+              statusNode,
+              ...(routeComparisonNode ? [routeComparisonNode] : []),
+              ...(hubImp
+                ? [
+                    <span key="hubImp" style={{ color: "#fbbf24" }}>
+                      最寄りハブ: H{hubImp.hubId} {hubImp.hubName}（直線距離 約
+                      {Math.round(hubImp.hubDistanceMeters)}m・{hubImp.modeLabel}）
+                    </span>,
+                  ]
+                : []),
+              ...(imp
+                ? [
+                    <span key="customStop" style={{ color: "#7dd3fc" }}>
+                      最寄り仮設停留所: {imp.stopLabel}（実効距離 約
+                      {Math.round(imp.afterBusEffectiveDistanceMeters)}m・徒歩
+                      {Math.round(imp.afterBusWalkMinutes)}分）
+                    </span>,
+                  ]
+                : []),
+              `既存最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
+              `最寄り鉄道駅: ${info.nearestStationName}（実効距離 約${Math.round(info.stationEffectiveDistanceMeters)}m・徒歩${Math.round(info.stationWalkMinutes)}分）`,
+              ...(info.totalFloorArea != null ? [`延床面積: 約${Math.round(info.totalFloorArea)}m²`] : []),
+              `プロファイル: ${info.walkProfileLabel}`,
+            ];
+
             setPopup({
               title: info.usage,
-              lines: [
-                statusNode,
-                ...(hubImp
-                  ? [
-                      <span key="hubImp" style={{ color: "#fbbf24" }}>
-                        最寄りハブ: H{hubImp.hubId} {hubImp.hubName}（直線距離 約
-                        {Math.round(hubImp.hubDistanceMeters)}m・{hubImp.modeLabel}）
-                      </span>,
-                    ]
-                  : []),
-                ...(imp
-                  ? [
-                      <span key="customStop" style={{ color: "#7dd3fc" }}>
-                        最寄り仮設停留所: {imp.stopLabel}（実効距離 約
-                        {Math.round(imp.afterBusEffectiveDistanceMeters)}m・徒歩
-                        {Math.round(imp.afterBusWalkMinutes)}分）
-                      </span>,
-                    ]
-                  : []),
-                `既存最寄りバス停: ${info.nearestStopName}（実効距離 約${Math.round(info.busEffectiveDistanceMeters)}m・徒歩${Math.round(info.busWalkMinutes)}分）`,
-                `最寄り鉄道駅: ${info.nearestStationName}（実効距離 約${Math.round(info.stationEffectiveDistanceMeters)}m・徒歩${Math.round(info.stationWalkMinutes)}分）`,
-                ...(info.totalFloorArea != null ? [`延床面積: 約${Math.round(info.totalFloorArea)}m²`] : []),
-                `プロファイル: ${info.walkProfileLabel}`,
-              ],
+              lines: buildBuildingPopupLines(),
             });
+
+            if (distanceModelRef.current === "network") {
+              const buildingId =
+                (picked.getProperty("uro:BuildingIDAttribute_uro:buildingID") as string | undefined) ??
+                `${info.lng},${info.lat}`;
+              const row = networkScoreMap?.get(buildingId);
+              const assignedCustomStop = imp ? customStops.find((s) => s.id === imp.stopId) : undefined;
+              let targetStopCoords: { lat: number; lng: number } | null = assignedCustomStop
+                ? { lat: assignedCustomStop.lat, lng: assignedCustomStop.lng }
+                : null;
+              if (!targetStopCoords) {
+                let bestStopDist = Infinity;
+                for (const s of majorOperatorStopList) {
+                  if (s.name !== info.nearestStopName) continue;
+                  const d = haversineMeters(info.lat, info.lng, s.lat, s.lng);
+                  if (d < bestStopDist) {
+                    bestStopDist = d;
+                    targetStopCoords = { lat: s.lat, lng: s.lng };
+                  }
+                }
+              }
+
+              if (row && targetStopCoords) {
+                const targetCoords = targetStopCoords;
+                void (async () => {
+                  const graph = await ensureRoutingGraph();
+                  if (cancelled || requestId !== popupRequestRef.current || !graph) return;
+                  const profile = walkProfileRef.current;
+                  if (!cachedRouteInspectRouter || cachedRouteInspectRouter.profile !== profile) {
+                    cachedRouteInspectRouter = { profile, router: new NetworkRouter(graph, profile) };
+                  }
+                  const route = cachedRouteInspectRouter.router.findPathFromNode(
+                    row.networkNode,
+                    targetCoords.lat,
+                    targetCoords.lng
+                  );
+                  if (!route || cancelled || requestId !== popupRequestRef.current) return;
+
+                  clearRouteComparisonEntities();
+                  const straightLine = viewer.entities.add({
+                    polyline: {
+                      positions: Cesium.Cartesian3.fromDegreesArray([
+                        info.lng,
+                        info.lat,
+                        targetCoords.lng,
+                        targetCoords.lat,
+                      ]),
+                      width: 3,
+                      material: new Cesium.PolylineDashMaterialProperty({
+                        color: Cesium.Color.fromCssColorString("#f8fafc").withAlpha(0.92),
+                        dashLength: 14,
+                      }),
+                      clampToGround: true,
+                      classificationType: Cesium.ClassificationType.TERRAIN,
+                    },
+                  });
+                  const roadPositions = Cesium.Cartesian3.fromDegreesArray(
+                    route.path.flatMap((pt) => [pt.lng, pt.lat])
+                  );
+                  const roadLine = viewer.entities.add({
+                    polyline: {
+                      positions: roadPositions,
+                      width: 6,
+                      material: new Cesium.PolylineOutlineMaterialProperty({
+                        color: Cesium.Color.fromCssColorString("#22d3ee"),
+                        outlineColor: Cesium.Color.fromCssColorString("#0f172a"),
+                        outlineWidth: 2,
+                      }),
+                      clampToGround: true,
+                      classificationType: Cesium.ClassificationType.TERRAIN,
+                    },
+                  });
+                  routeComparisonEntities = [straightLine, roadLine];
+                  viewer.scene.requestRender();
+
+                  const detourRatio = route.networkMeters / Math.max(route.straightMeters, 1);
+                  setPopup({
+                    title: info.usage,
+                    lines: buildBuildingPopupLines(
+                      <div
+                        key="routeCompare"
+                        style={{
+                          margin: "4px 0",
+                          padding: "5px 7px",
+                          borderRadius: 4,
+                          background: "rgba(34, 211, 238, 0.14)",
+                          border: "1px solid rgba(34, 211, 238, 0.4)",
+                          fontSize: 11.5,
+                          lineHeight: 1.45,
+                        }}
+                      >
+                        <div style={{ color: "#67e8f9", fontWeight: "bold" }}>
+                          直線 約{Math.round(route.straightMeters)}m → 道のり 約
+                          {Math.round(route.networkMeters)}m（迂回率 {detourRatio.toFixed(2)}倍）
+                        </div>
+                        <div style={{ fontSize: 10.5, color: "#cbd5e1", marginTop: 1 }}>
+                          <span style={{ color: "#22d3ee" }}>━</span> 実際の歩行ルート ／{" "}
+                          <span style={{ color: "#f8fafc" }}>┄</span> 直線距離
+                        </div>
+                      </div>
+                    ),
+                  });
+                })();
+              }
+            }
           } else {
             setPopup(null);
           }
@@ -4436,6 +4575,7 @@ export default function PlateauViewer() {
       reapplyCustomStopScoresRef.current = null;
       exportCustomStopSimulationGeoJsonRef.current = null;
       warmUpRoutingGraphRef.current = null;
+      clearRouteComparisonRef.current = null;
       if (roadSnapNoticeTimerRef.current) {
         clearTimeout(roadSnapNoticeTimerRef.current);
         roadSnapNoticeTimerRef.current = null;
@@ -4634,7 +4774,7 @@ export default function PlateauViewer() {
         isVisible={isDemandTransitPanelVisible}
         onClose={() => setIsDemandTransitPanelVisible(false)}
       />
-      {popup && <InfoPopup info={popup} onClose={() => { ++popupRequestRef.current; candidatePopupRef.current = false; setPopup(null); }} />}
+      {!isSimulationPanelVisible && popup && <InfoPopup info={popup} onClose={() => { ++popupRequestRef.current; candidatePopupRef.current = false; clearRouteComparisonRef.current?.(); setPopup(null); }} />}
       <CenterLoadingIndicator loadingState={centerLoading} />
     </div>
   );

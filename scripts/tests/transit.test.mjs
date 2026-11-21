@@ -35,6 +35,15 @@ test('routing respects a detour instead of using cross-barrier straight distance
   const result=new NetworkRouter(graph,'general').fromCandidate(35,139);
   assert.equal(result.distances[3],300);
 });
+test('findPathFromNode returns detour path and straight vs network distance comparison',()=>{
+  const graph={version:'test',missingElevationNodes:0,nodes:[[139,35,0],[139.001,35,0],[139.001,35.001,0],[139,35.001,0]],edges:[[0,1,100,120,140,1],[1,2,100,120,140,1],[2,3,100,120,140,1]]};
+  const route=new NetworkRouter(graph,'general').findPathFromNode(0,35.001,139);
+  assert.ok(route);
+  assert.equal(Math.round(route.networkMeters),300);
+  assert.equal(Math.round(route.effectiveMeters),360);
+  assert.ok(route.networkMeters>route.straightMeters);
+  assert.equal(route.path.length,4);
+});
 test('additional sites never worsen access and empty targets are supported',()=>{
   assert.deepEqual(buildGreedyDemandTransitPlan([],10,1),{sites:[],results:[]});
   const members=Array.from({length:20},(_,i)=>({lat:35+i*.001,lng:139,busStraightDistanceMeters:500,busEffectiveDistanceMeters:700,stationEffectiveDistanceMeters:2000,coverageRatio:700/400}));
